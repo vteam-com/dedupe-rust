@@ -33,14 +33,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
     
-    println!("Found {} image files:", image_files.len());
-    for (i, path) in image_files.iter().enumerate() {
-        println!("  {}. {}", i + 1, path.display());
-    }
-    
-    println!("\nStarting quick scan...");
     // Step 2: Quick scan with checksum
-    let quick_hashes = quick_scan(&image_files, 100)?; // Use fixed sample size of 100
+    let quick_hashes = quick_scan(&image_files, 10)?; // Use fixed sample size of 100
     
     // Step 3: Find potential duplicates based on quick hashes
     let potential_duplicates = find_potential_duplicates(quick_hashes);
@@ -53,7 +47,7 @@ fn main() -> Result<()> {
     println!("Found {} potential duplicate groups. Starting deep comparison...", potential_duplicates.len());
     
     // Step 4: Deep comparison for potential duplicates
-    let duplicates = deep_compare(potential_duplicates, args.threshold)?;
+    let duplicates = find_duplicates(potential_duplicates, args.threshold)?;
     
     // Print results
     if duplicates.is_empty() {
@@ -104,21 +98,18 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>> {
 fn quick_scan(files: &[PathBuf], sample_size: usize) -> Result<Vec<(PathBuf, String)>> {
     let pb = ProgressBar::new(files.len() as u64);
     pb.set_style(ProgressStyle::default_bar()
-        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")?);
+        .template("Quick scan [{elapsed_precise}]({eta}) [{bar:40.cyan/blue}] {pos}/{len} ({percent}%)")?);
     
     let results: Result<Vec<_>> = files.par_iter()
         .map(|path| {
             let result = compute_checksum(path, sample_size)
-                .map(|hash| {
-                    println!("  Hash for {}: {}", path.display(), hash);
-                    (path.clone(), hash)
-                });
+                .map(|hash| (path.clone(), hash));
             pb.inc(1);
             result
         })
         .collect();
     
-    pb.finish_with_message("Quick scan completed");
+    pb.finish_with_message("Quick scan complete");
     results
 }
 
@@ -168,22 +159,25 @@ fn find_potential_duplicates(hashes: Vec<(PathBuf, String)>) -> Vec<Vec<PathBuf>
         .collect()
 }
 
-fn deep_compare(groups: Vec<Vec<PathBuf>>, threshold: f64) -> Result<Vec<Vec<PathBuf>>> {
-    let pb = ProgressBar::new(groups.len() as u64);
-    pb.set_style(ProgressStyle::default_bar()
-        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")?);
+fn find_duplicates(groups: Vec<Vec<PathBuf>>, threshold: f64) -> Result<Vec<Vec<PathBuf>>> {
+    let total_comparisons: usize = groups.iter()
+        .map(|g| g.len().saturating_sub(1))
+        .sum();
+        
+    if total_comparisons == 0 {
+        return Ok(Vec::new());
+    }
     
-    let mut duplicates = Vec::new();
+    println!("Performing deep comparison on {} potential groups...", groups.len());
+    let pb = ProgressBar::new(total_comparisons as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {percent:>3}% Comparing images...")?);
+    
+    let mut all_groups = Vec::new();
     
     for group in groups {
-        pb.inc(1);
         if group.len() < 2 {
             continue;
-        }
-        
-        println!("\nChecking potential duplicate group:");
-        for path in &group {
-            println!("  - {}", path.display());
         }
         
         let mut current_group = vec![group[0].clone()];
@@ -191,24 +185,19 @@ fn deep_compare(groups: Vec<Vec<PathBuf>>, threshold: f64) -> Result<Vec<Vec<Pat
         
         for other_path in &group[1..] {
             let other_img = load_image(other_path)?;
-            let is_similar = compare_images(&base_img, &other_img, threshold);
-            println!("  Comparing {} with {}: {}", 
-                group[0].file_name().unwrap().to_string_lossy(),
-                other_path.file_name().unwrap().to_string_lossy(),
-                if is_similar { "MATCH" } else { "different" }
-            );
-            if is_similar {
+            if compare_images(&base_img, &other_img, threshold) {
                 current_group.push(other_path.clone());
             }
+            pb.inc(1);
         }
         
         if current_group.len() > 1 {
-            duplicates.push(current_group);
+            all_groups.push(current_group);
         }
     }
     
-    pb.finish_with_message("Deep comparison completed");
-    Ok(duplicates)
+    pb.finish_with_message("Deep comparison complete");
+    Ok(all_groups)
 }
 
 fn load_image(path: &Path) -> Result<DynamicImage> {
