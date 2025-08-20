@@ -1,0 +1,52 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Run Release (No Debug)",
+            "runtimeExecutable": "cargo",
+            "runtimeArgs": [
+                "run",
+                "--release",
+                "--",
+                "-d",
+                "C:\\mylioRoot\\Scanned\\Scanned-SnapScan-JP",
+                "-t",
+                "1.0"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "internalConsoleOptions": "neverOpen"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug with Custom Dir",
+            "program": "${workspaceFolder}/target/debug/duplicate_image_finder.exe",
+            "args": [
+                "${input:args}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "cargo build --release"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Release with Custom Dir",
+            "program": "${workspaceFolder}/target/release/duplicate_image_finder.exe",
+            "args": [
+                "${input:args}"
+            ],
+            "cwd": "${workspaceFolder}",
+            "preLaunchTask": "cargo build --release"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "args",
+            "type": "promptString",
+            "description": "Command line arguments (e.g., -d C:\\path\\to\\images -t 0.9)"
+        }
+    ]
+}

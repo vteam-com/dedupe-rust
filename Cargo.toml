@@ -1,0 +1,13 @@
+[package]
+name = "duplicate_image_finder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+image = { version = "0.24.7", features = ["jpeg", "png", "gif", "bmp", "tiff"] }
+walkdir = "2.3.3"
+anyhow = "1.0.75"
+rayon = "1.7.0"
+sha2 = "0.10.7"
+clap = { version = "4.3.24", features = ["derive"] }
+indicatif = "0.17.6"
