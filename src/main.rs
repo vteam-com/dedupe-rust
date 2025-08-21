@@ -128,7 +128,10 @@ fn quick_scan(files: &[PathBuf], sample_size: usize) -> Result<Vec<(PathBuf, Str
 }
 
 fn compute_checksum(path: &Path, sample_size: usize) -> Result<String> {
-    let img = image::open(path)?;
+    let img = match load_image(path)? {
+        Some(img) => img,
+        None => return Ok("ERROR".to_string()), // Return a special checksum for unloadable images
+    };
     let (width, height) = img.dimensions();
     
     // Calculate step size to sample roughly sample_size pixels
@@ -252,25 +255,24 @@ fn find_duplicates(
     Ok(all_groups)
 }
 
-fn load_image(path: &Path) -> Result<DynamicImage> {
-    let (width, height) = image::image_dimensions(path)
-        .map_err(|e| anyhow::anyhow!("Failed to get dimensions for {}: {}", path.display(), e))?;
-    
-    let file_size = std::fs::metadata(path)
-        .map(|m| format!("{:.1} KB", m.len() as f64 / 1024.0))
-        .unwrap_or_else(|_| "unknown".to_string());
-    
-    println!("    Loading: {} ({}x{}, {})", 
-             path.file_name().unwrap_or_default().to_string_lossy(),
-             width, height, file_size);
-    
-    let img = image::open(path)
-        .map_err(|e| anyhow::anyhow!("Failed to load image {}: {}", path.display(), e))?;
-    
-    Ok(img)
+fn load_image(path: &Path) -> Result<Option<DynamicImage>> {
+
+    match image::open(path) {
+        Ok(img) => Ok(Some(img)),
+        Err(e) => {
+            eprintln!("⚠️  Warning: Could not load image {}: {}", path.display(), e);
+            Ok(None)
+        }
+    }
 }
 
-fn compare_images(img1: &DynamicImage, img2: &DynamicImage, threshold: f64, early_termination: bool) -> bool {
+fn compare_images(img1: &Option<DynamicImage>, img2: &Option<DynamicImage>, threshold: f64, early_termination: bool) -> bool {
+    // If either image failed to load, they can't be compared
+    if img1.is_none() || img2.is_none() {
+        return false;
+    }
+    let img1 = img1.as_ref().unwrap();
+    let img2 = img2.as_ref().unwrap();
     // Get dimensions
     let (w1, h1) = img1.dimensions();
     let (w2, h2) = img2.dimensions();
