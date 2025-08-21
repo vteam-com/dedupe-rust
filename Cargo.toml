@@ -11,3 +11,9 @@ rayon = "1.7.0"
 sha2 = "0.10.7"
 clap = { version = "4.3.24", features = ["derive"] }
 indicatif = "0.17.6"
+
+[profile.release]
+debug = true
+
+[dev-dependencies]
+flamegraph = "0.6.9"

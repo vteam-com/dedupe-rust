@@ -3,8 +3,8 @@ use clap::Parser;
 use image::{DynamicImage, GenericImageView};
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Duplicate Image Finder - Find and manage duplicate images")]
@@ -14,12 +14,21 @@ struct Args {
     directory: String,
     
     /// Number of pixels to use for quick hash (default: 100)
-    #[arg(short, long, default_value_t = 100)]
+    #[arg(short, long, default_value_t = 20)]
     quick_pixels: usize,
     
     /// Similarity threshold (0.0-1.0) for deep comparison (default: 0.95)
-    #[arg(short, long, default_value_t = 0.95)]
+    #[arg(short, long, default_value_t = 1.0)]
     threshold: f64,
+    
+    /// Number of images to process in each batch (default: 1000)
+    #[arg(short, long, default_value_t = 1000)]
+    batch_size: usize,
+    
+    /// Enable early termination for obviously different images
+    #[arg(short = 'e', long, default_value_t = true)]
+    early_termination: bool,
+    
 }
 
 fn main() -> Result<()> {
@@ -47,7 +56,12 @@ fn main() -> Result<()> {
     println!("Found {} potential duplicate groups. Starting deep comparison...", potential_duplicates.len());
     
     // Step 4: Deep comparison for potential duplicates
-    let duplicates = find_duplicates(potential_duplicates, args.threshold)?;
+    let duplicates = find_duplicates(
+        potential_duplicates, 
+        args.threshold,
+        args.batch_size,
+        args.early_termination,
+    )?;
     
     // Print results
     if duplicates.is_empty() {
@@ -159,7 +173,12 @@ fn find_potential_duplicates(hashes: Vec<(PathBuf, String)>) -> Vec<Vec<PathBuf>
         .collect()
 }
 
-fn find_duplicates(groups: Vec<Vec<PathBuf>>, threshold: f64) -> Result<Vec<Vec<PathBuf>>> {
+fn find_duplicates(
+    groups: Vec<Vec<PathBuf>>, 
+    threshold: f64,
+    batch_size: usize,
+    early_termination: bool,
+) -> Result<Vec<Vec<PathBuf>>> {
     let total_comparisons: usize = groups.iter()
         .map(|g| g.len().saturating_sub(1))
         .sum();
@@ -170,32 +189,65 @@ fn find_duplicates(groups: Vec<Vec<PathBuf>>, threshold: f64) -> Result<Vec<Vec<
     
     println!("Performing deep comparison on {} potential groups...", groups.len());
     let pb = ProgressBar::new(total_comparisons as u64);
-    pb.set_style(ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {percent:>3}% Comparing images...")?);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {percent:>3}% | {msg}"
+        )?
+        .progress_chars("##-"),
+    );
     
-    let mut all_groups = Vec::new();
-    
-    for group in groups {
-        if group.len() < 2 {
-            continue;
-        }
-        
-        let mut current_group = vec![group[0].clone()];
-        let base_img = load_image(&group[0])?;
-        
-        for other_path in &group[1..] {
-            let other_img = load_image(other_path)?;
-            if compare_images(&base_img, &other_img, threshold) {
-                current_group.push(other_path.clone());
-            }
-            pb.inc(1);
-        }
-        
-        if current_group.len() > 1 {
-            all_groups.push(current_group);
-        }
-    }
-    
+    // Process groups in batches to control memory usage
+    let all_groups: Vec<Vec<PathBuf>> = groups.chunks(batch_size)
+        .flat_map(|batch| {
+            batch.par_iter()
+                .filter_map(|group| {
+                    if group.len() < 2 {
+                        return None;
+                    }
+                    
+                    // Load base image
+                    let base_path = &group[0];
+                    let base_img = match load_image(base_path) {
+                        Ok(img) => img,
+                        Err(_) => return None,
+                    };
+                    
+                    pb.set_message(format!("Processing: {}", 
+                        base_path.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                    
+                    let mut current_group = vec![base_path.clone()];
+                    
+                    // Compare with other images in the group
+                    for other_path in group.iter().skip(1) {
+                        pb.inc(1);
+                        
+                        let other_img = match load_image(other_path) {
+                            Ok(img) => img,
+                            Err(_) => continue,
+                        };
+                        
+                        pb.set_message(format!(
+                            "Comparing: {} vs {}", 
+                            base_path.file_name().unwrap_or_default().to_string_lossy(),
+                            other_path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                        
+                        if compare_images(&base_img, &other_img, threshold, early_termination) {
+                            current_group.push(other_path.clone());
+                        }
+                    }
+                    
+                    if current_group.len() > 1 {
+                        Some(current_group)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     pb.finish_with_message("Deep comparison complete");
     Ok(all_groups)
 }
@@ -218,7 +270,7 @@ fn load_image(path: &Path) -> Result<DynamicImage> {
     Ok(img)
 }
 
-fn compare_images(img1: &DynamicImage, img2: &DynamicImage, threshold: f64) -> bool {
+fn compare_images(img1: &DynamicImage, img2: &DynamicImage, threshold: f64, early_termination: bool) -> bool {
     // Get dimensions
     let (w1, h1) = img1.dimensions();
     let (w2, h2) = img2.dimensions();
@@ -227,10 +279,17 @@ fn compare_images(img1: &DynamicImage, img2: &DynamicImage, threshold: f64) -> b
     let aspect1 = w1 as f64 / h1 as f64;
     let aspect2 = w2 as f64 / h2 as f64;
     
-    // If aspect ratios are too different, they're probably not the same image
-    if (aspect1 - aspect2).abs() > 0.1 {
-        println!("    Different aspect ratios: {:.2} vs {:.2}", aspect1, aspect2);
-        return false;
+    // Early termination for obviously different images
+    if early_termination {
+        // Check aspect ratios first (fast check)
+        if (aspect1 - aspect2).abs() > 0.1 {
+            return false;
+        }
+        
+        // Check dimensions (very fast check)
+        if (w1 as i32 - w2 as i32).abs() > 100 || (h1 as i32 - h2 as i32).abs() > 100 {
+            return false;
+        }
     }
     
     // Resize both images to the same dimensions (using the smaller dimensions)
