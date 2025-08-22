@@ -5,6 +5,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use thousands::Separable;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Duplicate Image Finder - Find and manage duplicate images")]
@@ -67,11 +68,15 @@ fn main() -> Result<()> {
     if duplicates.is_empty() {
         println!("No duplicates found.");
     } else {
-        println!("\nFound {} duplicate groups:", duplicates.len());
-        for (i, group) in duplicates.iter().enumerate() {
-            println!("\nGroup {} ({} files):", i + 1, group.len());
+        // Sort groups by size (smallest first)
+        let mut sorted_duplicates = duplicates;
+        sorted_duplicates.sort_by_key(|group| group.len());
+        
+        println!("\nFound {} duplicate groups (sorted by size, smallest first):", sorted_duplicates.len().separate_with_commas());
+        for (i, group) in sorted_duplicates.iter().enumerate() {
+            println!("\nGroup {} ({} files):", (i + 1).separate_with_commas(), group.len().separate_with_commas());
             for path in group {
-                println!("  {}", path.display());
+                println!("+  {}", path.display());
             }
         }
     }
@@ -88,6 +93,7 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>> {
     
     let mut image_files = Vec::new();
     let extensions = ["jpg", "jpeg", "png", "gif", "bmp", "tiff"];
+    let mut extension_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     
     for entry in walkdir::WalkDir::new(directory)
         .into_iter()
@@ -96,16 +102,33 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>> {
             
         if let Some(ext) = entry.path().extension() {
             if let Some(ext_str) = ext.to_str() {
-                if extensions.contains(&ext_str.to_lowercase().as_str()) {
+                let ext_lower = ext_str.to_lowercase();
+                if extensions.contains(&ext_lower.as_str()) {
+                    *extension_counts.entry(ext_lower).or_insert(0) += 1;
                     image_files.push(entry.into_path());
-                    pb.set_message(format!("Found {} image files...", image_files.len()));
+                    pb.set_message(format!("Found {} image files...", image_files.len().separate_with_commas()));
                 }
             }
         }
         pb.tick();
     }
     
-    pb.finish_with_message(format!("Found {} image files", image_files.len()));
+    // Display the summary of found files by extension
+    if !extension_counts.is_empty() {
+        println!("\nFound image files by extension (sorted by count):");
+        let mut extensions: Vec<_> = extension_counts.iter().collect();
+        // Sort by count in descending order, then by extension name
+        extensions.sort_by(|(a_ext, a_count), (b_ext, b_count)| 
+            a_count.cmp(b_count).then_with(|| b_ext.cmp(a_ext))
+        );
+        
+        for (ext, &count) in extensions {
+            println!(">  .{}: {}", ext, count.separate_with_commas());
+        }
+        println!(); // Add an extra newline for better readability
+    }
+    
+    pb.finish_with_message(format!("Found {} image files in total", image_files.len().separate_with_commas()));
     Ok(image_files)
 }
 
