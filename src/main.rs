@@ -65,27 +65,27 @@ fn main() -> Result<()> {
     for (ext_idx, (ext, ext_files)) in extensions.into_iter().enumerate() {
         println!("\n\n=== Processing .{} files ({} of {}) ===", ext, ext_idx + 1, total_extensions);
         
+        // Create a progress bar with consistent style
+        let pb = ProgressBar::new(ext_files.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} files ({eta})")
+                .unwrap()
+                .progress_chars("#=:-·")
+        );
+        
         // Group files of this extension by dimensions
         let mut dimension_groups: std::collections::HashMap<(u32, u32), Vec<PathBuf>> = std::collections::HashMap::new();
-        let pb = ProgressBar::new(ext_files.len() as u64);
-        let template = format!("{{spinner:.green}} [{{elapsed_precise}}] Grouping .{} files [{{bar:40.cyan/blue}}] {{pos}}/{{len}} ({{eta}}) {{percent}}% | {{msg}}", ext);
-        pb.set_style(
-            ProgressStyle::with_template(&template)?
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-                .progress_chars("#>-\u{00B7}")
-        );
-        pb.enable_steady_tick(std::time::Duration::from_millis(120));
         
-        for file in &ext_files {
-            pb.inc(1);
-            if let Ok(img) = image::open(file) {
+        for file in ext_files {
+            if let Ok(img) = image::open(&file) {
                 let dimensions = img.dimensions();
                 dimension_groups.entry(dimensions)
                     .or_default()
                     .push(file.clone());
             }
+            pb.inc(1);
         }
-        pb.finish_with_message("Grouping complete");
+        pb.finish_with_message("Done");
         
         // Separate groups with potential duplicates from unique dimensions
         let (mut dim_groups, unique_dims): (Vec<_>, Vec<_>) = dimension_groups
@@ -116,12 +116,16 @@ fn main() -> Result<()> {
             continue;
         }
         
-        // Print dimension groups with potential duplicates
-        println!("\n.{}: Found {} dimension groups with potential duplicates:", ext, dim_groups.len());
+        // Print dimension groups with potential duplicates (sorted by width then height)
+        println!("\n.{}: Found {} dimension groups with potential duplicates (sorted by dimensions):", ext, dim_groups.len());
+        
+        // Sort by width, then height
+        dim_groups.sort_by(|((w1, h1), _), ((w2, h2), _)| (w1, h1).cmp(&(w2, h2)));
+        
         for ((w, h), files) in &dim_groups {
-            println!("  - {}x{}: {} {}", 
+            println!("  - {:>5}x{:<5} : {:>4} {}", 
                     w, h, 
-                    files.len(),
+                    files.len().separate_with_commas(),
                     if files.len() == 1 { "file" } else { "files" });
         }
         
@@ -235,23 +239,28 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>> {
 }
 
 fn quick_scan(files: &[PathBuf], sample_size: usize) -> Result<Vec<(PathBuf, String)>> {
-    let pb = ProgressBar::new(files.len() as u64);
+    let total_files = files.len();
+    println!("  Computing checksums for {} files...", total_files.separate_with_commas());
+    
+    let pb = ProgressBar::new(total_files as u64);
     pb.set_style(
-        ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {percent}% | {msg}")?
-        .progress_chars("#>-\u{00B7}")
+        ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} hashes ({eta})")
+            .unwrap()
+            .progress_chars("#=:-·")
     );
     
-    let results: Result<Vec<_>> = files.par_iter()
+    let result = files.par_iter()
         .map(|path| {
             let result = compute_checksum(path, sample_size)
                 .map(|hash| (path.clone(), hash));
             pb.inc(1);
             result
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into);
     
-    pb.finish_with_message("Quick scan complete");
-    results
+    pb.finish_with_message("Done");
+    result
 }
 
 fn compute_checksum(path: &Path, sample_size: usize) -> Result<String> {
@@ -318,21 +327,20 @@ fn find_duplicates(
         return Ok(Vec::new());
     }
     
-    println!("Performing deep comparison on {} potential groups...", groups.len());
-    let pb = ProgressBar::new(total_comparisons as u64);
+    let total_groups = groups.len();
+    let pb = ProgressBar::new(total_groups as u64);
     pb.set_style(
         ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] Deep comparing [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {percent}% | {msg}"
-        )?
-        .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-        .progress_chars("#>-\u{00B7}")
+            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} groups ({eta})\n{msg}"
+        )
+        .unwrap()
+        .progress_chars("#=:-·")
     );
-    pb.enable_steady_tick(std::time::Duration::from_millis(120));
-    
+
     // Process groups in batches to control memory usage
     let all_groups: Vec<Vec<PathBuf>> = groups.chunks(batch_size)
         .flat_map(|batch| {
-            batch.par_iter()
+            let batch_result = batch.par_iter()
                 .filter_map(|group| {
                     if group.len() < 2 {
                         return None;
@@ -341,47 +349,36 @@ fn find_duplicates(
                     // Load base image
                     let base_path = &group[0];
                     let base_img = match load_image(base_path) {
-                        Ok(img) => img,
-                        Err(_) => return None,
+                        Ok(Some(img)) => img,
+                        _ => return None,
                     };
-                    
-                    pb.set_message(format!("Processing: {}", 
-                        base_path.file_name().unwrap_or_default().to_string_lossy()
-                    ));
                     
                     let mut current_group = vec![base_path.clone()];
                     
                     // Compare with other images in the group
                     for other_path in group.iter().skip(1) {
-                        pb.inc(1);
-                        
-                        let other_img = match load_image(other_path) {
-                            Ok(img) => img,
-                            Err(_) => continue,
-                        };
-                        
-                        pb.set_message(format!(
-                            "Comparing: {} vs {}", 
-                            base_path.file_name().unwrap_or_default().to_string_lossy(),
-                            other_path.file_name().unwrap_or_default().to_string_lossy()
-                        ));
-                        
-                        if compare_images(&base_img, &other_img, threshold, early_termination) {
-                            current_group.push(other_path.clone());
+                        if let Ok(Some(other_img)) = load_image(other_path) {
+                            if compare_images(&Some(base_img.clone()), &Some(other_img), threshold, early_termination) {
+                                current_group.push(other_path.clone());
+                            }
                         }
                     }
                     
                     if current_group.len() > 1 {
+                        pb.set_message(format!("Found group with {} duplicates", current_group.len() - 1));
                         Some(current_group)
                     } else {
                         None
                     }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            
+            pb.inc(batch.len() as u64);
+            batch_result
         })
         .collect();
-
-    pb.finish_with_message("Deep comparison complete");
+    
+    pb.finish_with_message(format!("✓ Found {} duplicate groups", all_groups.len()));
     Ok(all_groups)
 }
 
