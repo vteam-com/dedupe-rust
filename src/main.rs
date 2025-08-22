@@ -43,26 +43,60 @@ fn main() -> Result<()> {
         return Ok(());
     }
     
-    // Step 2: Quick scan with checksum
-    let quick_hashes = quick_scan(&image_files, 10)?; // Use fixed sample size of 100
-    
-    // Step 3: Find potential duplicates based on quick hashes
-    let potential_duplicates = find_potential_duplicates(quick_hashes);
-    
-    if potential_duplicates.is_empty() {
-        println!("No potential duplicates found in quick scan.");
-        return Ok(());
+    // Step 2: Group files by extension
+    let mut files_by_extension: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
+    for file in &image_files {
+        if let Some(ext) = file.extension().and_then(|e| e.to_str()) {
+            files_by_extension.entry(ext.to_lowercase()).or_default().push(file.clone());
+        }
     }
     
-    println!("Found {} potential duplicate groups. Starting deep comparison...", potential_duplicates.len());
+    // Convert to vector and sort by number of files (smallest to largest)
+    let mut extensions: Vec<_> = files_by_extension.into_iter().collect();
+    extensions.sort_by_key(|(_, files)| files.len());
     
-    // Step 4: Deep comparison for potential duplicates
-    let duplicates = find_duplicates(
-        potential_duplicates, 
-        args.threshold,
-        args.batch_size,
-        args.early_termination,
-    )?;
+    // Process each extension group separately (smallest first)
+    let mut all_duplicates = Vec::new();
+    let mut total_groups_processed = 0;
+    let total_extensions = extensions.len();
+    
+    for (ext, ext_files) in extensions {
+        println!("\nProcessing {} files with extension .{}...", ext_files.len(), ext);
+        
+        // Skip if we don't have enough files to find duplicates
+        if ext_files.len() < 2 {
+            continue;
+        }
+        
+        // Step 3: Quick scan with checksum for this extension group
+        let quick_hashes = quick_scan(&ext_files, args.quick_pixels)?;
+        
+        // Step 4: Find potential duplicates based on quick hashes
+        let potential_duplicates = find_potential_duplicates(quick_hashes);
+        
+        if potential_duplicates.is_empty() {
+            println!("  No potential duplicates found for .{} files.", ext);
+            continue;
+        }
+        
+        println!("  Found {} potential duplicate groups for .{} files. Starting deep comparison...", 
+                potential_duplicates.len(), ext);
+        
+        // Step 5: Deep comparison for potential duplicates in this group
+        let duplicates = find_duplicates(
+            potential_duplicates, 
+            args.threshold,
+            args.batch_size,
+            args.early_termination,
+        )?;
+        
+        all_duplicates.extend(duplicates);
+        total_groups_processed += 1;
+        println!("  Completed processing .{} files ({} groups found so far, {}/{} extensions processed)",
+                ext, all_duplicates.len(), total_groups_processed, total_extensions);
+    }
+    
+    let duplicates = all_duplicates;
     
     // Print results
     if duplicates.is_empty() {
@@ -92,7 +126,7 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>> {
     pb.set_message("Searching for image files...");
     
     let mut image_files = Vec::new();
-    let extensions = ["jpg", "jpeg", "png", "gif", "bmp", "tiff"];
+    let extensions = ["jpg", "jpeg", "png", "gif",  "tiff"];
     let mut extension_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     
     for entry in walkdir::WalkDir::new(directory)
