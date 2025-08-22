@@ -573,6 +573,7 @@ dependencies = [
  "indicatif 0.17.11",
  "rayon",
  "sha2",
+ "thiserror 1.0.69",
  "walkdir",
 ]
 

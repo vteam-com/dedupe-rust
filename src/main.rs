@@ -132,35 +132,36 @@ fn compute_checksum(path: &Path, sample_size: usize) -> Result<String> {
         Some(img) => img,
         None => return Ok("ERROR".to_string()), // Return a special checksum for unloadable images
     };
+
     let (width, height) = img.dimensions();
-    
-    // Calculate step size to sample roughly sample_size pixels
-    let total_pixels = (width * height) as usize;
-    let step = (total_pixels / sample_size.max(1)).max(1) as u32;
-    
-    // Simple checksum using sampled pixels
-    let mut checksum: u64 = 0;
-    let mut count = 0;
-    
-    for y in (0..height).step_by(step as usize) {
-        for x in (0..width).step_by(step as usize) {
-            if x < width && y < height {
-                let pixel = img.get_pixel(x, y);
-                // Simple checksum: sum of RGB values with some bit shifting
-                checksum = checksum.wrapping_add(
-                    ((pixel[0] as u64) << 16) | 
-                    ((pixel[1] as u64) << 8) | 
-                    (pixel[2] as u64)
-                );
-                count += 1;
-            }
-        }
+    if width == 0 || height == 0 {
+        return Ok("EMPTY".to_string());
     }
-    
-    // Include image dimensions in the hash to catch differently sized images
+
+    // --- Updated: downscale first to avoid iterating over full-res pixels ---
+    // We scale the image down to at most `sqrt(sample_size)` in each dimension.
+    // This ensures we work on at most ~sample_size pixels, regardless of original size.
+    let target_side = (sample_size as f64).sqrt().ceil() as u32;
+    let resized = img.thumbnail(target_side, target_side);
+
+    let (_w, _h) = resized.dimensions();
+    let mut checksum: u64 = 0;
+    let mut count = 0usize;
+
+    // Iterate over all pixels of the reduced image
+    for pixel in resized.to_rgb8().pixels() {
+        checksum = checksum.wrapping_add(
+            ((pixel[0] as u64) << 16)
+                | ((pixel[1] as u64) << 8)
+                | (pixel[2] as u64),
+        );
+        count += 1;
+    }
+
+    // Include original image dimensions in the hash
     let dim_hash = (width as u64) << 32 | (height as u64);
     let final_hash = checksum.wrapping_mul(count as u64) ^ dim_hash;
-    
+
     Ok(format!("{:016x}", final_hash))
 }
 
@@ -256,7 +257,6 @@ fn find_duplicates(
 }
 
 fn load_image(path: &Path) -> Result<Option<DynamicImage>> {
-
     match image::open(path) {
         Ok(img) => Ok(Some(img)),
         Err(e) => {
