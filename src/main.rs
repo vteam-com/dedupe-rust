@@ -33,6 +33,7 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    
     let args = Args::parse();
     println!("Scanning directory: {}", args.directory);
     
@@ -43,8 +44,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
     
-        // Step 2: First group files by extension
-    println!("\nGrouping files by extension...");
+    // Step 2: First group files by extension
+
     let mut files_by_extension: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
     for file in &image_files {
         if let Some(ext) = file.extension().and_then(|e| e.to_str()) {
@@ -63,12 +64,12 @@ fn main() -> Result<()> {
     
     // Process each extension group separately
     for (ext_idx, (ext, ext_files)) in extensions.into_iter().enumerate() {
-        println!("\n\n=== Processing .{} files ({} of {}) ===", ext, ext_idx + 1, total_extensions);
+        println!("\n[.{}] files ({} of {})", ext, ext_idx + 1, total_extensions);
         
         // Create a progress bar with consistent style
         let pb = ProgressBar::new(ext_files.len() as u64);
         pb.set_style(
-            ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} files ({eta})")
+            ProgressStyle::with_template("Getting dimensions [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} files ({eta})")
                 .unwrap()
                 .progress_chars("#=:-·")
         );
@@ -97,53 +98,31 @@ fn main() -> Result<()> {
         
         // Print unique dimensions summary
         if !unique_dims.is_empty() {
-            let unique_count: usize = unique_dims.iter().map(|(_, files)| files.len()).sum();
-            let dims_list: Vec<String> = unique_dims
-                .into_iter()
-                .map(|((w, h), _)| format!("{}x{}", w, h))
-                .collect();
-            
-            println!("\n.{}: Found {} files with unique dimensions ({}): {}", 
-                    ext, 
-                    unique_count,
-                    if unique_count == 1 { "file" } else { "files" },
-                    dims_list.join(", ")
-            );
+            println!("  Skiping {} unique dimensions that have no potential duplicates.", unique_dims.len().separate_with_commas());         
         }
-        
-        if dim_groups.is_empty() {
-            println!("  No potential duplicate groups found for .{} files.", ext);
-            continue;
-        }
-        
-        // Print dimension groups with potential duplicates (sorted by width then height)
-        println!("\n.{}: Found {} dimension groups with potential duplicates (sorted by dimensions):", ext, dim_groups.len());
-        
+
+        if !dim_groups.is_empty() {
+            println!("  Quick sampling of {} groups of dimensions.", dim_groups.len());
+        }        
         // Sort by width, then height
         dim_groups.sort_by(|((w1, h1), _), ((w2, h2), _)| (w1, h1).cmp(&(w2, h2)));
         
-        for ((w, h), files) in &dim_groups {
-            println!("  - {:>5}x{:<5} : {:>4} {}", 
-                    w, h, 
-                    files.len().separate_with_commas(),
-                    if files.len() == 1 { "file" } else { "files" });
-        }
-        
         // Process each dimension group for this extension
-        for ((_width, _height), files) in dim_groups {
+        for ((width, height), files) in dim_groups {
+            print!("|---[{:>6} x{:>6}] {:>6} files = ", width, height, files.len());
             
             // Step 3: Quick scan with checksum for this dimension group
-            let quick_hashes = quick_scan(&files, args.quick_pixels)?;
+            let quick_hashes = quick_scan(&files, args.quick_pixels, (width, height))?;
             
             // Step 4: Find potential duplicates based on quick hashes
             let potential_duplicates = find_potential_duplicates(quick_hashes);
             
             if potential_duplicates.is_empty() {
-                println!("  No potential duplicates found for this group.");
+                println!("No potential duplicates.");
                 continue;
             }
             
-            println!("  Found {} potential duplicate groups. Starting deep comparison...", 
+            println!("Found {} potential duplicate groups. Starting deep comparison...", 
                     potential_duplicates.len());
             
             // Step 5: Deep comparison for potential duplicates in this group
@@ -168,12 +147,12 @@ fn main() -> Result<()> {
         // Sort groups by size (smallest first)
         let mut sorted_duplicates = all_duplicates;
         sorted_duplicates.sort_by_key(|group| group.len());
-        
-        println!("\nFound {} duplicate groups (sorted by size, smallest first):", sorted_duplicates.len().separate_with_commas());
+        println!("\n========================================================");
+        println!("Found {} duplicate groups (sorted by size, smallest first):", sorted_duplicates.len().separate_with_commas());
         for (i, group) in sorted_duplicates.iter().enumerate() {
             println!("\nGroup {} ({} files):", (i + 1).separate_with_commas(), group.len().separate_with_commas());
             for path in group {
-                println!("+  {}", path.display());
+                println!("  {}", path.display());
             }
         }
     }
@@ -238,28 +217,45 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>> {
     Ok(image_files)
 }
 
-fn quick_scan(files: &[PathBuf], sample_size: usize) -> Result<Vec<(PathBuf, String)>> {
+fn quick_scan(files: &[PathBuf], sample_size: usize, group_dims: (u32, u32)) -> Result<Vec<(PathBuf, String)>> {
     let total_files = files.len();
-    println!("  Computing checksums for {} files...", total_files.separate_with_commas());
     
     let pb = ProgressBar::new(total_files as u64);
-    pb.set_style(
-        ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} hashes ({eta})")
-            .unwrap()
-            .progress_chars("#=:-·")
-    );
+    let style = ProgressStyle::with_template(
+        "[{elapsed_precise}]{eta} [{msg:>12}] {bar:40.cyan/blue} {pos:>7}/{len:7}"
+    )
+    .unwrap()
+    .progress_chars("#=:-·");
+    
+    pb.set_style(style);
+    let dims_msg = format!("{}x{}", group_dims.0, group_dims.1);
+    pb.set_message(dims_msg.clone());
     
     let result = files.par_iter()
         .map(|path| {
+            // Get dimensions for the current file
+            let dims = match image::open(path) {
+                Ok(img) => {
+                    let (w, h) = img.dimensions();
+                    format!("{}x{}", w, h)
+                },
+                _ => "unknown".to_string()
+            };
+            
+            // Update progress with dimensions
+            let msg = format!("{:>12}", dims);
+            pb.set_message(msg);
+            
+            // Compute checksum
             let result = compute_checksum(path, sample_size)
                 .map(|hash| (path.clone(), hash));
+                
             pb.inc(1);
             result
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into);
     
-    pb.finish_with_message("Done");
     result
 }
 
