@@ -78,8 +78,7 @@ fn main() -> Result<()> {
         let mut dimension_groups: std::collections::HashMap<(u32, u32), Vec<PathBuf>> = std::collections::HashMap::new();
         
         for file in ext_files {
-            if let Ok(img) = image::open(&file) {
-                let dimensions = img.dimensions();
+            if let Ok(dimensions) = image::image_dimensions(&file) {
                 dimension_groups.entry(dimensions)
                     .or_default()
                     .push(file.clone());
