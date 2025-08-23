@@ -1,10 +1,12 @@
 use anyhow::Result;
-use clap::Parser;
-use image::{DynamicImage, GenericImageView};
-use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use rayon::iter::IntoParallelRefIterator;
+use clap::Parser;
+use image::{DynamicImage, GenericImageView, ImageFormat};
+use indicatif::{ProgressBar, ProgressStyle};
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
 use thousands::Separable;
 
 #[derive(Parser, Debug)]
@@ -32,7 +34,35 @@ struct Args {
     
 }
 
-fn main() -> Result<()> {
+fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let ext = path.extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
+    
+    let format = match ext.as_deref() {
+        Some("jpg") | Some("jpeg") => Some(ImageFormat::Jpeg),
+        Some("png") => Some(ImageFormat::Png),
+        Some("gif") => Some(ImageFormat::Gif),
+        Some("webp") => Some(ImageFormat::WebP),
+        _ => None,
+    };
+    
+    if let Some(format) = format {
+        if let Ok(file) = File::open(path) {
+            let reader = BufReader::new(file);
+            if let Ok(dimensions) = image::io::Reader::with_format(reader, format)
+                .with_guessed_format()
+                .map_err(|_| ())
+                .and_then(|r| Ok(r.into_dimensions().map_err(|_| ())?))
+            {
+                return Some(dimensions);
+            }
+        }
+    }
+    None
+}
+
+fn main() -> Result<(), anyhow::Error> {
     
     let args = Args::parse();
     println!("Scanning directory: {}", args.directory);
@@ -59,7 +89,7 @@ fn main() -> Result<()> {
     let mut extensions: Vec<_> = files_by_extension.into_iter().collect();
     extensions.sort_by_key(|(ext, _)| ext.clone());
     
-    let mut all_duplicates = Vec::new();
+    let mut all_duplicates: Vec<Vec<PathBuf>> = Vec::new();
     let total_extensions = extensions.len();
     
     // Process each extension group separately
@@ -69,7 +99,7 @@ fn main() -> Result<()> {
         // Create a progress bar with consistent style
         let pb = ProgressBar::new(ext_files.len() as u64);
         pb.set_style(
-            ProgressStyle::with_template("Getting dimensions [{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} files ({eta})")
+            ProgressStyle::with_template("Getting dimensions [{elapsed_precise}] {eta} {bar:40.cyan/blue} {pos:>7}/{len:7} files")
                 .unwrap()
                 .progress_chars("#=:-·")
         );
@@ -78,7 +108,7 @@ fn main() -> Result<()> {
         let mut dimension_groups: std::collections::HashMap<(u32, u32), Vec<PathBuf>> = std::collections::HashMap::new();
         
         for file in ext_files {
-            if let Ok(dimensions) = image::image_dimensions(&file) {
+            if let Some(dimensions) = get_dimensions(&file) {
                 dimension_groups.entry(dimensions)
                     .or_default()
                     .push(file.clone());
@@ -108,7 +138,7 @@ fn main() -> Result<()> {
         
         // Process each dimension group for this extension
         for ((width, height), files) in dim_groups {
-            print!("|---[{:>6} x{:>6}] {:>6} files = ", width, height, files.len());
+            print!("[{:>6}x{:<6}] {:>6} files = ", width, height, files.len());
             
             // Step 3: Quick scan with checksum for this dimension group
             let quick_hashes = quick_scan(&files, args.quick_pixels, (width, height))?;
@@ -159,9 +189,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn find_image_files(directory: &str) -> Result<Vec<PathBuf>> {
-    
-    let mut image_files = Vec::new();
+fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
     let all_image_extensions = [
         // Processed formats (will be checked for duplicates)
         "jpg", "jpeg", "png", "gif",
@@ -170,9 +198,10 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>> {
         "arw", "orf", "rw2", "svg", "eps", "ai", "pdf", "ico", "dds",
         "psd", "xcf", "exr", "jp2"
     ];
-    let processed_extensions = ["jpg", "jpeg", "png", "gif"];
     
+    let processed_extensions = ["jpg", "jpeg", "png", "gif"];
     let mut extension_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut image_files = Vec::new();
     
     for entry in walkdir::WalkDir::new(directory)
         .into_iter()
@@ -181,22 +210,17 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>> {
             
         if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
             let ext_lower = ext.to_lowercase();
+            *extension_counts.entry(ext_lower.clone()).or_default() += 1;
             
-            // Count all image extensions
             if all_image_extensions.contains(&ext_lower.as_str()) {
-                *extension_counts.entry(ext_lower.clone()).or_insert(0) += 1;
-                
-                // Only add to processing list if it's one of our processed extensions
-                if processed_extensions.contains(&ext_lower.as_str()) {
-                    image_files.push(entry.into_path());
-                }
+                image_files.push(entry.path().to_path_buf());
             }
         }
     }
     
-    // Display the summary of found files by extension
+    // Print summary of found extensions
     if !extension_counts.is_empty() {
-        println!("\nFound {} image files by extension:",  image_files.len().separate_with_commas());
+        println!("\nFound {} image files by extension: ",  image_files.len().separate_with_commas());
         println!("   (sorted by count)");
         println!("   ([X] Marked extensions will be checked for duplicates)");
         
@@ -216,49 +240,7 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>> {
     Ok(image_files)
 }
 
-fn quick_scan(files: &[PathBuf], sample_size: usize, group_dims: (u32, u32)) -> Result<Vec<(PathBuf, String)>> {
-    let total_files = files.len();
-    
-    let pb = ProgressBar::new(total_files as u64);
-    let style = ProgressStyle::with_template(
-        "[{elapsed_precise}]{eta} [{msg:>12}] {bar:40.cyan/blue} {pos:>7}/{len:7}"
-    )
-    .unwrap()
-    .progress_chars("#=:-·");
-    
-    pb.set_style(style);
-    let dims_msg = format!("{}x{}", group_dims.0, group_dims.1);
-    pb.set_message(dims_msg.clone());
-    
-    let result = files.par_iter()
-        .map(|path| {
-            // Get dimensions for the current file
-            let dims = match image::open(path) {
-                Ok(img) => {
-                    let (w, h) = img.dimensions();
-                    format!("{}x{}", w, h)
-                },
-                _ => "unknown".to_string()
-            };
-            
-            // Update progress with dimensions
-            let msg = format!("{:>12}", dims);
-            pb.set_message(msg);
-            
-            // Compute checksum
-            let result = compute_checksum(path, sample_size)
-                .map(|hash| (path.clone(), hash));
-                
-            pb.inc(1);
-            result
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(Into::into);
-    
-    result
-}
-
-fn compute_checksum(path: &Path, sample_size: usize) -> Result<String> {
+fn compute_checksum(path: &Path, sample_size: usize) -> Result<String, anyhow::Error> {
     let img = match load_image(path)? {
         Some(img) => img,
         None => return Ok("ERROR".to_string()), // Return a special checksum for unloadable images
@@ -296,8 +278,38 @@ fn compute_checksum(path: &Path, sample_size: usize) -> Result<String> {
     Ok(format!("{:016x}", final_hash))
 }
 
+fn quick_scan(files: &[PathBuf], sample_size: usize, group_dims: (u32, u32)) -> Result<Vec<(PathBuf, String)>, anyhow::Error> {
+    let pb = ProgressBar::new(files.len() as u64);
+    pb.set_style(ProgressStyle::with_template(
+        "[{elapsed_precise}]{eta} [{msg:>12}] {bar:40.cyan/blue} {pos:>7}/{len:7}"
+    )
+    .unwrap()
+    .progress_chars("#=:-·"));
+    
+    let dims_msg = format!("{}x{}", group_dims.0, group_dims.1);
+    pb.set_message(dims_msg.clone());
+    
+    let result = files.par_iter()
+        .map(|path| {
+            let ext = path.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let msg = format!("{} {}x{}", ext, group_dims.0, group_dims.1);
+            pb.set_message(msg);
+            
+            let result = compute_checksum(path, sample_size)
+                .map(|hash| (path.clone(), hash));
+                
+            pb.inc(1);
+            result
+        })
+        .collect::<Result<Vec<_>, _>>()?;        
+    Ok(result)
+}
+
 fn find_potential_duplicates(hashes: Vec<(PathBuf, String)>) -> Vec<Vec<PathBuf>> {
-    let mut hash_map: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    let mut hash_map: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
     
     for (path, hash) in hashes {
         hash_map.entry(hash).or_default().push(path);
@@ -313,7 +325,7 @@ fn find_duplicates(
     threshold: f64,
     batch_size: usize,
     early_termination: bool,
-) -> Result<Vec<Vec<PathBuf>>> {
+) -> Result<Vec<Vec<PathBuf>>, anyhow::Error> {
     let total_comparisons: usize = groups.iter()
         .map(|g| g.len().saturating_sub(1))
         .sum();
@@ -377,7 +389,7 @@ fn find_duplicates(
     Ok(all_groups)
 }
 
-fn load_image(path: &Path) -> Result<Option<DynamicImage>> {
+fn load_image(path: &Path) -> Result<Option<DynamicImage>, anyhow::Error> {
     match image::open(path) {
         Ok(img) => Ok(Some(img)),
         Err(e) => {
