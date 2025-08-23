@@ -1,3 +1,8 @@
+//! # Duplicate Image Finder
+//! 
+//! A command-line tool to find and manage duplicate images in a directory.
+//! It uses perceptual hashing and image comparison to identify similar images.
+
 use anyhow::Result;
 use rayon::prelude::*;
 use rayon::iter::IntoParallelRefIterator;
@@ -9,6 +14,10 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use thousands::Separable;
 
+/// Command-line arguments for the duplicate image finder.
+/// 
+/// This struct defines all the command-line arguments that the program accepts,
+/// including directory to scan, comparison thresholds, and performance settings.
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Duplicate Image Finder - Find and manage duplicate images")]
 struct Args {
@@ -34,6 +43,14 @@ struct Args {
     
 }
 
+/// Gets the dimensions of an image file.
+///
+/// # Arguments
+/// * `path` - Path to the image file
+///
+/// # Returns
+/// * `Some((width, height))` if the dimensions could be determined
+/// * `None` if the file is not a supported image format or could not be read
 fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
     let ext = path.extension()
         .and_then(|e| e.to_str())
@@ -189,6 +206,18 @@ fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Recursively finds all image files in the specified directory.
+///
+/// # Arguments
+/// * `directory` - The directory to search for image files
+///
+/// # Returns
+/// * `Ok(Vec<PathBuf>)` - A vector of paths to found image files
+/// * `Err(anyhow::Error)` - If there was an error reading the directory
+///
+/// # Supported Formats
+/// * Processed for duplicates: jpg, jpeg, png, gif
+/// * Listed but not processed: bmp, tiff, tif, webp, heic, heif, raw, cr2, nef, arw, orf, rw2, svg, eps, ai, pdf, ico, dds, psd, xcf, exr, jp2
 fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
     let all_image_extensions = [
         // Processed formats (will be checked for duplicates)
@@ -240,6 +269,18 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
     Ok(image_files)
 }
 
+/// Computes a perceptual hash of an image for quick comparison.
+///
+/// This function creates a hash that represents the visual content of the image.
+/// Images with similar content will have similar hashes.
+///
+/// # Arguments
+/// * `path` - Path to the image file
+/// * `sample_size` - Number of pixels to use for the hash (affects accuracy vs performance)
+///
+/// # Returns
+/// * `Ok(String)` - A hexadecimal string representing the image's perceptual hash
+/// * `Err(anyhow::Error)` - If there was an error reading or processing the image
 fn compute_checksum(path: &Path, sample_size: usize) -> Result<String, anyhow::Error> {
     let img = match load_image(path)? {
         Some(img) => img,
@@ -278,6 +319,20 @@ fn compute_checksum(path: &Path, sample_size: usize) -> Result<String, anyhow::E
     Ok(format!("{:016x}", final_hash))
 }
 
+/// Performs a quick scan of images to find potential duplicates.
+///
+/// This function processes images in parallel and computes their perceptual hashes.
+/// It's called "quick" because it uses a sampling approach rather than comparing
+/// every pixel of every image.
+///
+/// # Arguments
+/// * `files` - Slice of image file paths to process
+/// * `sample_size` - Number of pixels to use for the perceptual hash
+/// * `group_dims` - The dimensions (width, height) that all images in this group share
+///
+/// # Returns
+/// * `Ok(Vec<(PathBuf, String)>)` - Vector of (file path, hash) tuples
+/// * `Err(anyhow::Error)` - If there was an error processing any of the images
 fn quick_scan(files: &[PathBuf], sample_size: usize, group_dims: (u32, u32)) -> Result<Vec<(PathBuf, String)>, anyhow::Error> {
     let pb = ProgressBar::new(files.len() as u64);
     pb.set_style(ProgressStyle::with_template(
@@ -308,6 +363,14 @@ fn quick_scan(files: &[PathBuf], sample_size: usize, group_dims: (u32, u32)) -> 
     Ok(result)
 }
 
+/// Groups files with identical hashes together as potential duplicates.
+///
+/// # Arguments
+/// * `hashes` - Vector of (file path, hash) tuples
+///
+/// # Returns
+/// * `Vec<Vec<PathBuf>>` - A vector of groups, where each group contains paths to
+///   files that have identical hashes and are potential duplicates
 fn find_potential_duplicates(hashes: Vec<(PathBuf, String)>) -> Vec<Vec<PathBuf>> {
     let mut hash_map: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
     
@@ -320,6 +383,20 @@ fn find_potential_duplicates(hashes: Vec<(PathBuf, String)>) -> Vec<Vec<PathBuf>
         .collect()
 }
 
+/// Performs a detailed comparison of potentially duplicate images.
+///
+/// This function loads each image and compares them pixel-by-pixel to determine
+/// if they are actual duplicates above the specified similarity threshold.
+///
+/// # Arguments
+/// * `groups` - Groups of potentially duplicate images
+/// * `threshold` - Similarity threshold (0.0-1.0) for considering images as duplicates
+/// * `batch_size` - Number of images to process in each batch (for memory efficiency)
+/// * `early_termination` - If true, stop comparing images as soon as they're determined to be different
+///
+/// # Returns
+/// * `Ok(Vec<Vec<PathBuf>>)` - Groups of confirmed duplicate images
+/// * `Err(anyhow::Error)` - If there was an error processing the images
 fn find_duplicates(
     groups: Vec<Vec<PathBuf>>, 
     threshold: f64,
@@ -389,6 +466,15 @@ fn find_duplicates(
     Ok(all_groups)
 }
 
+/// Loads an image from disk with error handling.
+///
+/// # Arguments
+/// * `path` - Path to the image file
+///
+/// # Returns
+/// * `Ok(Some(image))` - If the image was loaded successfully
+/// * `Ok(None)` - If the image could not be loaded (with error message printed to stderr)
+/// * `Err(anyhow::Error)` - If there was an unexpected error
 fn load_image(path: &Path) -> Result<Option<DynamicImage>, anyhow::Error> {
     match image::open(path) {
         Ok(img) => Ok(Some(img)),
@@ -399,6 +485,17 @@ fn load_image(path: &Path) -> Result<Option<DynamicImage>, anyhow::Error> {
     }
 }
 
+/// Compares two images and determines if they are similar enough to be considered duplicates.
+///
+/// # Arguments
+/// * `img1` - First image to compare
+/// * `img2` - Second image to compare
+/// * `threshold` - Similarity threshold (0.0-1.0) for considering images as duplicates
+/// * `early_termination` - If true, stop comparing as soon as images are determined to be different
+///
+/// # Returns
+/// * `true` if the images are considered duplicates (similarity >= threshold)
+/// * `false` otherwise
 fn compare_images(img1: &Option<DynamicImage>, img2: &Option<DynamicImage>, threshold: f64, early_termination: bool) -> bool {
     // If either image failed to load, they can't be compared
     if img1.is_none() || img2.is_none() {
