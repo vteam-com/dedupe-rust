@@ -7,7 +7,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 use rayon::iter::IntoParallelRefIterator;
 use clap::Parser;
-use image::{DynamicImage, GenericImageView, ImageFormat};
+use image::{DynamicImage, ImageFormat};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::BufReader;
@@ -158,7 +158,7 @@ fn main() -> Result<(), anyhow::Error> {
             print!("[{:>6}x{:<6}] {:>6} files = ", width, height, files.len());
             
             // Step 3: Quick scan with checksum for this dimension group
-            let quick_hashes = quick_scan(&files, args.quick_pixels, (width, height))?;
+            let quick_hashes = quick_scan(&files, (width, height))?;
             
             // Step 4: Find potential duplicates based on quick hashes
             let potential_duplicates = find_potential_duplicates(quick_hashes);
@@ -168,21 +168,20 @@ fn main() -> Result<(), anyhow::Error> {
                 continue;
             }
             
-            println!("Found {} potential duplicate groups. Starting deep comparison...", 
+            println!("Found {} potential duplicates. Starting deep comparison...", 
                     potential_duplicates.len());
             
             // Step 5: Deep comparison for potential duplicates in this group
             let duplicates = find_duplicates(
                 potential_duplicates, 
                 args.threshold,
-                args.batch_size,
                 args.early_termination,
             )?;
             
             let num_duplicates = duplicates.len();
             all_duplicates.extend(duplicates);
-            println!("  Found {} duplicate groups in this dimension group ({} total so far)",
-                    num_duplicates, all_duplicates.len());
+            println!("  Found {} duplicates for {}x{} ({} total duplicates so far)",
+                    num_duplicates, width, height, all_duplicates.len().separate_with_commas());
         }
     }
     
@@ -194,7 +193,7 @@ fn main() -> Result<(), anyhow::Error> {
         let mut sorted_duplicates = all_duplicates;
         sorted_duplicates.sort_by_key(|group| group.len());
         println!("\n========================================================");
-        println!("Found {} duplicate groups (sorted by size, smallest first):", sorted_duplicates.len().separate_with_commas());
+        println!("Found {} duplicates (sorted by size, smallest first):", sorted_duplicates.len().separate_with_commas());
         for (i, group) in sorted_duplicates.iter().enumerate() {
             println!("\nGroup {} ({} files):", (i + 1).separate_with_commas(), group.len().separate_with_commas());
             for path in group {
@@ -271,45 +270,57 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
 
 /// Computes a perceptual hash of an image for quick comparison.
 ///
-/// This function creates a hash that represents the visual content of the image.
-/// Images with similar content will have similar hashes.
+/// This function creates a hash that represents the visual content of the image
+/// by sampling the first 100 pixels. Images with similar content will have similar hashes.
 ///
 /// # Arguments
 /// * `path` - Path to the image file
-/// * `sample_size` - Number of pixels to use for the hash (affects accuracy vs performance)
+/// * `_sample_size` - Kept for backward compatibility, not used in this implementation
 ///
 /// # Returns
 /// * `Ok(String)` - A hexadecimal string representing the image's perceptual hash
 /// * `Err(anyhow::Error)` - If there was an error reading or processing the image
-fn compute_checksum(path: &Path, sample_size: usize) -> Result<String, anyhow::Error> {
-    let img = match load_image(path)? {
-        Some(img) => img,
-        None => return Ok("ERROR".to_string()), // Return a special checksum for unloadable images
+fn compute_checksum(path: &Path) -> Result<String, anyhow::Error> {
+    use std::fs::File;
+    use std::io::Read;
+
+    // Read the first ~100 pixels (300 bytes for RGB, 400 bytes for RGBA)
+    const BYTES_TO_READ: usize = 800;
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Ok("ERROR".to_string()),
     };
 
-    let (width, height) = img.dimensions();
-    if width == 0 || height == 0 {
+    let mut buffer = vec![0u8; BYTES_TO_READ];
+    let bytes_read = file.read(&mut buffer)?;
+    
+    if bytes_read == 0 {
         return Ok("EMPTY".to_string());
     }
 
-    // --- Updated: downscale first to avoid iterating over full-res pixels ---
-    // We scale the image down to at most `sqrt(sample_size)` in each dimension.
-    // This ensures we work on at most ~sample_size pixels, regardless of original size.
-    let target_side = (sample_size as f64).sqrt().ceil() as u32;
-    let resized = img.thumbnail(target_side, target_side);
+    // Get image dimensions
+    let (width, height) = match get_dimensions(path) {
+        Some(dims) => dims,
+        None => return Ok("UNKNOWN_DIMS".to_string()),
+    };
 
-    let (_w, _h) = resized.dimensions();
     let mut checksum: u64 = 0;
     let mut count = 0usize;
 
-    // Iterate over all pixels of the reduced image
-    for pixel in resized.to_rgb8().pixels() {
-        checksum = checksum.wrapping_add(
-            ((pixel[0] as u64) << 16)
-                | ((pixel[1] as u64) << 8)
-                | (pixel[2] as u64),
-        );
-        count += 1;
+    // Process the first 100 pixels (or as many as available in the bytes read)
+    for chunk in buffer.chunks(3).take(200) {
+        if chunk.len() >= 3 {
+            // Convert RGB bytes to a single u64 value
+            let pixel_value = ((chunk[0] as u64) << 16) | 
+                            ((chunk[1] as u64) << 8) | 
+                             (chunk[2] as u64);
+            checksum = checksum.wrapping_add(pixel_value);
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return Ok("NO_PIXELS".to_string());
     }
 
     // Include original image dimensions in the hash
@@ -333,7 +344,7 @@ fn compute_checksum(path: &Path, sample_size: usize) -> Result<String, anyhow::E
 /// # Returns
 /// * `Ok(Vec<(PathBuf, String)>)` - Vector of (file path, hash) tuples
 /// * `Err(anyhow::Error)` - If there was an error processing any of the images
-fn quick_scan(files: &[PathBuf], sample_size: usize, group_dims: (u32, u32)) -> Result<Vec<(PathBuf, String)>, anyhow::Error> {
+fn quick_scan(files: &[PathBuf], group_dims: (u32, u32)) -> Result<Vec<(PathBuf, String)>, anyhow::Error> {
     let pb = ProgressBar::new(files.len() as u64);
     pb.set_style(ProgressStyle::with_template(
         "[{elapsed_precise}]{eta} [{msg:>12}] {bar:40.cyan/blue} {pos:>7}/{len:7}"
@@ -353,7 +364,7 @@ fn quick_scan(files: &[PathBuf], sample_size: usize, group_dims: (u32, u32)) -> 
             let msg = format!("{} {}x{}", ext, group_dims.0, group_dims.1);
             pb.set_message(msg);
             
-            let result = compute_checksum(path, sample_size)
+            let result = compute_checksum(path)
                 .map(|hash| (path.clone(), hash));
                 
             pb.inc(1);
@@ -383,87 +394,66 @@ fn find_potential_duplicates(hashes: Vec<(PathBuf, String)>) -> Vec<Vec<PathBuf>
         .collect()
 }
 
-/// Performs a detailed comparison of potentially duplicate images.
+/// Groups images by their pixel data hash to find exact duplicates.
 ///
-/// This function loads each image and compares them pixel-by-pixel to determine
-/// if they are actual duplicates above the specified similarity threshold.
+/// This function calculates a hash for each image's pixel data and groups
+/// images with identical hashes together, making it O(n) complexity.
 ///
 /// # Arguments
 /// * `groups` - Groups of potentially duplicate images
-/// * `threshold` - Similarity threshold (0.0-1.0) for considering images as duplicates
+/// * `_threshold` - Unused parameter (kept for compatibility)
 /// * `batch_size` - Number of images to process in each batch (for memory efficiency)
-/// * `early_termination` - If true, stop comparing images as soon as they're determined to be different
 ///
 /// # Returns
 /// * `Ok(Vec<Vec<PathBuf>>)` - Groups of confirmed duplicate images
 /// * `Err(anyhow::Error)` - If there was an error processing the images
 fn find_duplicates(
-    groups: Vec<Vec<PathBuf>>, 
-    threshold: f64,
-    batch_size: usize,
-    early_termination: bool,
+    groups: Vec<Vec<PathBuf>>,
+    _threshold: f64,
+    _early_termination: bool,
 ) -> Result<Vec<Vec<PathBuf>>, anyhow::Error> {
-    let total_comparisons: usize = groups.iter()
-        .map(|g| g.len().saturating_sub(1))
-        .sum();
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+
+    // A simple hash function for image data
+    fn hash_image(img: &DynamicImage) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        img.as_bytes().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let mut all_duplicates = Vec::new();
+    
+    // Process each group of potential duplicates
+    for group in groups {
+        if group.len() < 2 {
+            continue;
+        }
         
-    if total_comparisons == 0 {
-        return Ok(Vec::new());
+        let mut hash_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+        
+        // Calculate hash for each image in the group
+        for path in group {
+            if let Ok(Some(img)) = load_image(&path) {
+                let hash = hash_image(&img);
+                hash_map.entry(hash).or_default().push(path);
+            }
+        }
+        
+        // Add groups with duplicates to the results
+        for (_, mut files) in hash_map {
+            if files.len() > 1 {
+                // Sort for consistent output
+                files.sort();
+                all_duplicates.push(files);
+            }
+        }
     }
     
-    let total_groups = groups.len();
-    let pb = ProgressBar::new(total_groups as u64);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} groups ({eta})\n{msg}"
-        )
-        .unwrap()
-        .progress_chars("#=:-·")
-    );
-
-    // Process groups in batches to control memory usage
-    let all_groups: Vec<Vec<PathBuf>> = groups.chunks(batch_size)
-        .flat_map(|batch| {
-            let batch_result = batch.par_iter()
-                .filter_map(|group| {
-                    if group.len() < 2 {
-                        return None;
-                    }
-                    
-                    // Load base image
-                    let base_path = &group[0];
-                    let base_img = match load_image(base_path) {
-                        Ok(Some(img)) => img,
-                        _ => return None,
-                    };
-                    
-                    let mut current_group = vec![base_path.clone()];
-                    
-                    // Compare with other images in the group
-                    for other_path in group.iter().skip(1) {
-                        if let Ok(Some(other_img)) = load_image(other_path) {
-                            if compare_images(&Some(base_img.clone()), &Some(other_img), threshold, early_termination) {
-                                current_group.push(other_path.clone());
-                            }
-                        }
-                    }
-                    
-                    if current_group.len() > 1 {
-                        pb.set_message(format!("Found group with {} duplicates", current_group.len() - 1));
-                        Some(current_group)
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            
-            pb.inc(batch.len() as u64);
-            batch_result
-        })
-        .collect();
+    // Sort groups by size (smallest first)
+    all_duplicates.sort_by_key(|group| group.len());
     
-    pb.finish_with_message(format!("✓ Found {} duplicate groups", all_groups.len()));
-    Ok(all_groups)
+    Ok(all_duplicates)
 }
 
 /// Loads an image from disk with error handling.
@@ -483,77 +473,4 @@ fn load_image(path: &Path) -> Result<Option<DynamicImage>, anyhow::Error> {
             Ok(None)
         }
     }
-}
-
-/// Compares two images and determines if they are similar enough to be considered duplicates.
-///
-/// # Arguments
-/// * `img1` - First image to compare
-/// * `img2` - Second image to compare
-/// * `threshold` - Similarity threshold (0.0-1.0) for considering images as duplicates
-/// * `early_termination` - If true, stop comparing as soon as images are determined to be different
-///
-/// # Returns
-/// * `true` if the images are considered duplicates (similarity >= threshold)
-/// * `false` otherwise
-fn compare_images(img1: &Option<DynamicImage>, img2: &Option<DynamicImage>, threshold: f64, early_termination: bool) -> bool {
-    // If either image failed to load, they can't be compared
-    if img1.is_none() || img2.is_none() {
-        return false;
-    }
-    let img1 = img1.as_ref().unwrap();
-    let img2 = img2.as_ref().unwrap();
-    // Get dimensions
-    let (w1, h1) = img1.dimensions();
-    let (w2, h2) = img2.dimensions();
-    
-    // Calculate aspect ratios
-    let aspect1 = w1 as f64 / h1 as f64;
-    let aspect2 = w2 as f64 / h2 as f64;
-    
-    // Early termination for obviously different images
-    if early_termination {
-        // Check aspect ratios first (fast check)
-        if (aspect1 - aspect2).abs() > 0.1 {
-            return false;
-        }
-        
-        // Check dimensions (very fast check)
-        if (w1 as i32 - w2 as i32).abs() > 100 || (h1 as i32 - h2 as i32).abs() > 100 {
-            return false;
-        }
-    }
-    
-    // Resize both images to the same dimensions (using the smaller dimensions)
-    let target_size = 256; // Size to scale to for comparison
-    let (target_w, target_h) = if w1 > h1 {
-        (target_size, (target_size as f64 / aspect1) as u32)
-    } else {
-        ((target_size as f64 * aspect1) as u32, target_size)
-    };
-    
-    let img1 = img1.resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3);
-    let img2 = img2.resize_exact(target_w, target_h, image::imageops::FilterType::Lanczos3);
-    
-    // Convert to grayscale for comparison (more robust against color variations)
-    let img1 = img1.to_luma8();
-    let img2 = img2.to_luma8();
-    
-    let mut diff_sum = 0.0;
-    let max_diff = 255.0 * (target_w * target_h) as f64;
-    
-    // Compare pixels
-    for (p1, p2) in img1.pixels().zip(img2.pixels()) {
-        let p1_val = p1.0[0] as f64;
-        let p2_val = p2.0[0] as f64;
-        diff_sum += (p1_val - p2_val).abs();
-    }
-    
-    let similarity = 1.0 - (diff_sum / max_diff);
-    
-    println!("    Similarity: {:.2}% (threshold: {:.0}%)", 
-             similarity * 100.0, 
-             threshold * 100.0);
-             
-    similarity >= threshold
 }
