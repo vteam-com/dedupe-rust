@@ -196,7 +196,17 @@ fn main() -> Result<(), anyhow::Error> {
         println!("\n========================================================");
         println!("Found {} duplicates (sorted by size, smallest first):", sorted_duplicates.len().separate_with_commas());
         for (i, group) in sorted_duplicates.iter().enumerate() {
-            println!("\nGroup {} ({} files):", (i + 1).separate_with_commas(), group.len().separate_with_commas());
+            // Get dimensions of the first image in the group
+            let dimensions = group.first()
+                .and_then(|p| get_dimensions(p))
+                .map(|(w, h)| format!("{}x{}", w, h))
+                .unwrap_or_else(|| "unknown".to_string());
+            
+            println!("\nGroup {} ({} files, {}):", 
+                (i + 1).separate_with_commas(), 
+                group.len().separate_with_commas(),
+                dimensions
+            );
             for path in group {
                 println!("  {}", path.display());
             }
