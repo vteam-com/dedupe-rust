@@ -180,8 +180,11 @@ fn main() -> Result<(), anyhow::Error> {
             let num_duplicates = duplicates.len();
             all_duplicates.extend(duplicates);
             if num_duplicates > 0 {
-                println!("                     {} duplicate(s) found ({} total duplicates so far)",
-                        num_duplicates, all_duplicates.len().separate_with_commas());
+                use colored::Colorize;
+                              
+                println!("  ^^^^^^^^^^^   >>>> {} duplicate(s) found ({} total duplicates so far)",
+                        num_duplicates.to_string().yellow(), 
+                        all_duplicates.len().separate_with_commas().yellow().bold());
             }
         }
     }

@@ -13,6 +13,7 @@ clap = { version = "4.3.24", features = ["derive"] }
 indicatif = "0.17.6"
 thiserror = "1.0.47"
 thousands = "0.2.0"
+colored = "2.0.4"
 
 [profile.release]
 debug = true
