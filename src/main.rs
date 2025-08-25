@@ -430,38 +430,44 @@ fn find_duplicates(
         hasher.finish()
     }
 
+    let total_groups = groups.len();
+    let mut processed_groups = 0;
     let mut all_duplicates = Vec::new();
+    
+    // Create a progress bar for the entire operation
+    let pb = ProgressBar::new(total_groups as u64);
+    pb.set_style(
+        ProgressStyle::with_template("Processing: [{bar:40.cyan/blue}] {pos}/{len} groups ({eta})\n{msg}")
+        .unwrap()
+        .progress_chars("#=:-·")
+    );
     
     // Process each group of potential duplicates
     for group in groups {
         if group.len() < 2 {
+            processed_groups += 1;
+            pb.inc(1);
             continue;
         }
         
-        let pb = ProgressBar::new(group.len() as u64);
-        pb.set_style(
-            ProgressStyle::with_template("Hashing images: [{bar:40.cyan/blue}] {pos}/{len} files ({eta})\n{msg}")
-            .unwrap()
-            .progress_chars("#=:-·")
-        );
+        if let Some(group_info) = group.first() {
+            if let Some(dir) = group_info.parent() {
+                pb.set_message(format!("Group {}: {} files in {}", 
+                    processed_groups + 1, 
+                    group.len(), 
+                    dir.display()));
+            }
+        }
         
         let mut hash_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
         
         // Calculate hash for each image in the group
         for path in &group {
-            if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
-                pb.set_message(filename.to_string());
-            }
-            
             if let Ok(Some(img)) = load_image(path) {
                 let hash = hash_image(&img);
                 hash_map.entry(hash).or_default().push(path.clone());
             }
-            
-            pb.inc(1);
         }
-        
-        pb.finish_with_message("Finished hashing");
         
         // Add groups with duplicates to the results
         for (_, mut files) in hash_map {
@@ -471,10 +477,15 @@ fn find_duplicates(
                 all_duplicates.push(files);
             }
         }
+        
+        processed_groups += 1;
+        pb.inc(1);
     }
     
     // Sort groups by size (smallest first)
     all_duplicates.sort_by_key(|group| group.len());
+    
+    pb.finish_with_message("Finished processing all groups");
     
     Ok(all_duplicates)
 }
