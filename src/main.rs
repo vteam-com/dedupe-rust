@@ -24,23 +24,10 @@ struct Args {
     /// Directory to scan for duplicate images (default: current directory)
     #[arg(short, long, default_value = ".")]
     directory: String,
-    
-    /// Number of pixels to use for quick hash (default: 100)
-    #[arg(short, long, default_value_t = 20)]
-    quick_pixels: usize,
-    
-    /// Similarity threshold (0.0-1.0) for deep comparison (default: 0.95)
-    #[arg(short, long, default_value_t = 1.0)]
-    threshold: f64,
-    
+        
     /// Number of images to process in each batch (default: 1000)
     #[arg(short, long, default_value_t = 1000)]
-    batch_size: usize,
-    
-    /// Enable early termination for obviously different images
-    #[arg(short = 'e', long, default_value_t = true)]
-    early_termination: bool,
-    
+    batch_size: usize,    
 }
 
 /// Gets the dimensions of an image file.
@@ -171,11 +158,7 @@ fn main() -> Result<(), anyhow::Error> {
             println!("{} potential duplicates. Switching to full compare...", potential_duplicates.len());
             
             // Step 5: Deep comparison for potential duplicates in this group
-            let duplicates = find_duplicates(
-                potential_duplicates, 
-                args.threshold,
-                args.early_termination,
-            )?;
+            let duplicates = find_duplicates(potential_duplicates)?;
             
             let num_duplicates = duplicates.len();
             all_duplicates.extend(duplicates);
@@ -284,63 +267,75 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
 
 /// Computes a perceptual hash of an image for quick comparison.
 ///
-/// This function creates a hash that represents the visual content of the image
-/// by sampling the first 100 pixels. Images with similar content will have similar hashes.
+/// This function creates a 64-bit hash that represents the visual content of the image
+/// by sampling the first 400 pixels. The hash is computed by:
+/// 1. Reading the first 1200-1600 bytes of the image (400 pixels × 3-4 bytes per pixel)
+/// 2. Converting each RGB pixel to a 24-bit value
+/// 3. Summing these values with proper bit shifting
+/// 4. Incorporating the image dimensions into the final hash
 ///
 /// # Arguments
 /// * `path` - Path to the image file
-/// * `_sample_size` - Kept for backward compatibility, not used in this implementation
 ///
 /// # Returns
-/// * `Ok(String)` - A hexadecimal string representing the image's perceptual hash
+/// * `Ok(String)` - A 16-character hexadecimal string representing the 64-bit hash
 /// * `Err(anyhow::Error)` - If there was an error reading or processing the image
+///
+/// # Notes
+/// - The hash is designed to be fast while providing reasonable uniqueness
+/// - Images with similar visual content will have similar hash values
+/// - The hash is sensitive to image dimensions and pixel values
 fn compute_checksum(path: &Path) -> Result<String, anyhow::Error> {
     use std::fs::File;
     use std::io::Read;
 
-    // Read the first ~100 pixels (300 bytes for RGB, 400 bytes for RGBA)
-    const BYTES_TO_READ: usize = 800;
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Ok("ERROR".to_string()),
-    };
+    // Constants for the hash computation
+    const PIXELS_TO_SAMPLE: usize = 400;
+    const BYTES_PER_PIXEL: usize = 3; // RGB
+    const BUFFER_SIZE: usize = PIXELS_TO_SAMPLE * BYTES_PER_PIXEL;
+    
+    // Read the initial portion of the image file
+    let mut file = File::open(path)
+        .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", path.display(), e))?;
 
-    let mut buffer = vec![0u8; BYTES_TO_READ];
+    let mut buffer = vec![0u8; BUFFER_SIZE];
     let bytes_read = file.read(&mut buffer)?;
     
     if bytes_read == 0 {
-        return Ok("EMPTY".to_string());
+        return Ok("EMPTY_FILE".to_string());
     }
 
-    // Get image dimensions
-    let (width, height) = match get_dimensions(path) {
-        Some(dims) => dims,
-        None => return Ok("UNKNOWN_DIMS".to_string()),
-    };
+    // Get image dimensions for the final hash
+    let (width, height) = get_dimensions(path)
+        .ok_or_else(|| anyhow::anyhow!("Could not determine image dimensions"))?;
 
-    let mut checksum: u64 = 0;
-    let mut count = 0usize;
+    // Process pixels to compute the checksum
+    let (checksum, valid_pixels) = buffer
+        .chunks(BYTES_PER_PIXEL)
+        .take(PIXELS_TO_SAMPLE)
+        .filter_map(|chunk| {
+            if chunk.len() >= BYTES_PER_PIXEL {
+                Some((
+                    ((chunk[0] as u64) << 16) | ((chunk[1] as u64) << 8) | (chunk[2] as u64),
+                    1
+                ))
+            } else {
+                None
+            }
+        })
+        .fold((0u64, 0usize), |(sum, count), (pixel, valid)| {
+            (sum.wrapping_add(pixel), count + valid)
+        });
 
-    // Process the first 100 pixels (or as many as available in the bytes read)
-    for chunk in buffer.chunks(3).take(200) {
-        if chunk.len() >= 3 {
-            // Convert RGB bytes to a single u64 value
-            let pixel_value = ((chunk[0] as u64) << 16) | 
-                            ((chunk[1] as u64) << 8) | 
-                             (chunk[2] as u64);
-            checksum = checksum.wrapping_add(pixel_value);
-            count += 1;
-        }
+    if valid_pixels == 0 {
+        return Ok("NO_VALID_PIXELS".to_string());
     }
 
-    if count == 0 {
-        return Ok("NO_PIXELS".to_string());
-    }
-
-    // Include original image dimensions in the hash
+    // Combine pixel data with image dimensions for final hash
     let dim_hash = (width as u64) << 32 | (height as u64);
-    let final_hash = checksum.wrapping_mul(count as u64) ^ dim_hash;
+    let final_hash = checksum.wrapping_mul(valid_pixels as u64) ^ dim_hash;
 
+    // Format as 16-character hex string (64 bits)
     Ok(format!("{:016x}", final_hash))
 }
 
@@ -415,19 +410,16 @@ fn find_potential_duplicates(hashes: Vec<(PathBuf, String)>) -> Vec<Vec<PathBuf>
 ///
 /// # Arguments
 /// * `groups` - Groups of potentially duplicate images
-/// * `_threshold` - Unused parameter (kept for compatibility)
-/// * `batch_size` - Number of images to process in each batch (for memory efficiency)
 ///
 /// # Returns
 /// * `Ok(Vec<Vec<PathBuf>>)` - Groups of confirmed duplicate images
 /// * `Err(anyhow::Error)` - If there was an error processing the images
 fn find_duplicates(
-    groups: Vec<Vec<PathBuf>>,
-    _threshold: f64,
-    _early_termination: bool,
+    groups: Vec<Vec<PathBuf>>
 ) -> Result<Vec<Vec<PathBuf>>, anyhow::Error> {
     use std::collections::HashMap;
     use std::hash::{Hash, Hasher};
+    use rayon::prelude::*;
 
     // A simple hash function for image data
     fn hash_image(img: &DynamicImage) -> u64 {
@@ -436,59 +428,65 @@ fn find_duplicates(
         hasher.finish()
     }
 
-    let total_groups = groups.len();
-    let mut processed_groups = 0;
-    let mut all_duplicates = Vec::new();
-    
     // Create a progress bar for the entire operation
-    let pb = ProgressBar::new(total_groups as u64);
+    let pb = ProgressBar::new(groups.len() as u64);
     pb.set_style(
-        ProgressStyle::with_template("Processing: [{bar:40.cyan/blue}] {pos}/{len} groups ({eta})\n{msg}")
+        ProgressStyle::with_template("  ^^^^^^^^^^^   {bar:40.cyan/blue} {pos}/{len} ({eta})\n{msg}")
         .unwrap()
         .progress_chars("#=:-·")
     );
-    
-    // Process each group of potential duplicates
-    for group in groups {
-        if group.len() < 2 {
-            processed_groups += 1;
+
+    // Process groups in parallel
+    let results: Vec<Vec<Vec<PathBuf>>> = groups
+        .par_iter()
+        .enumerate()
+        .filter_map(|(i, group)| {
+            if group.len() < 2 {
+                pb.inc(1);
+                return None;
+            }
+
+            // Update progress message
+            if let Some(group_info) = group.first() {
+                if let Some(dir) = group_info.parent() {
+                    pb.set_message(format!("Group {}: {} files in {}", 
+                        i + 1, 
+                        group.len(), 
+                        dir.display()));
+                }
+            }
+
+            let mut hash_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
+            
+            // Calculate hash for each image in the group
+            for path in group {
+                if let Ok(Some(img)) = load_image(path) {
+                    let hash = hash_image(&img);
+                    hash_map.entry(hash).or_default().push(path.clone());
+                }
+            }
+            
+            // Collect duplicates from this group
+            let mut group_duplicates = Vec::new();
+            for (_, mut files) in hash_map {
+                if files.len() > 1 {
+                    files.sort();
+                    group_duplicates.push(files);
+                }
+            }
+            
             pb.inc(1);
-            continue;
-        }
-        
-        if let Some(group_info) = group.first() {
-            if let Some(dir) = group_info.parent() {
-                pb.set_message(format!("Group {}: {} files in {}", 
-                    processed_groups + 1, 
-                    group.len(), 
-                    dir.display()));
+            
+            if !group_duplicates.is_empty() {
+                Some(group_duplicates)
+            } else {
+                None
             }
-        }
-        
-        let mut hash_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-        
-        // Calculate hash for each image in the group
-        for path in &group {
-            if let Ok(Some(img)) = load_image(path) {
-                let hash = hash_image(&img);
-                hash_map.entry(hash).or_default().push(path.clone());
-            }
-        }
-        
-        // Add groups with duplicates to the results
-        for (_, mut files) in hash_map {
-            if files.len() > 1 {
-                // Sort for consistent output
-                files.sort();
-                all_duplicates.push(files);
-            }
-        }
-        
-        processed_groups += 1;
-        pb.inc(1);
-    }
+        })
+        .collect();
     
-    // Sort groups by size (smallest first)
+    // Flatten the results and sort by group size
+    let mut all_duplicates: Vec<Vec<PathBuf>> = results.into_iter().flatten().collect();
     all_duplicates.sort_by_key(|group| group.len());
     
     Ok(all_duplicates)
