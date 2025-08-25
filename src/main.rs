@@ -115,19 +115,19 @@ fn main() -> Result<(), anyhow::Error> {
     extensions.sort_by_key(|(ext, _)| ext.clone());
     
     let mut all_duplicates: Vec<Vec<PathBuf>> = Vec::new();
-    let total_extensions = extensions.len();
     
     // Process each extension group separately
-    for (ext_idx, (ext, ext_files)) in extensions.into_iter().enumerate() {
-        println!("\n[.{}] files ({} of {})", ext, ext_idx + 1, total_extensions);
-        
-        // Create a progress bar with consistent style
+    for (_ext_idx, (ext, ext_files)) in extensions.into_iter().enumerate() {
+        // Create a progress bar with file type and dimensions
         let pb = ProgressBar::new(ext_files.len() as u64);
         pb.set_style(
-            ProgressStyle::with_template("Getting dimensions [{elapsed_precise}] {eta} {bar:40.cyan/blue} {pos:>7}/{len:7} files")
+            ProgressStyle::with_template("Getting dimensions for {msg} [{elapsed_precise}] {eta} {bar:40.cyan/blue} {pos}/{len}")
                 .unwrap()
                 .progress_chars("#=:-·")
         );
+        
+        // Set initial message with file type and count
+        pb.set_message(format!("'.{:<6}'", ext));
         
         // Group files of this extension by dimensions
         let mut dimension_groups: std::collections::HashMap<(u32, u32), Vec<PathBuf>> = std::collections::HashMap::new();
@@ -140,24 +140,16 @@ fn main() -> Result<(), anyhow::Error> {
             }
             pb.inc(1);
         }
-        pb.finish_with_message("Done");
         
         // Separate groups with potential duplicates from unique dimensions
-        let (mut dim_groups, unique_dims): (Vec<_>, Vec<_>) = dimension_groups
+        let (mut dim_groups, _unique_dims): (Vec<_>, Vec<_>) = dimension_groups
             .into_iter()
             .partition(|(_, files)| files.len() >= 2);
         
         // Sort groups by size (smallest first)
         dim_groups.sort_by_key(|(_, files)| files.len());
         
-        // Print unique dimensions summary
-        if !unique_dims.is_empty() {
-            println!("  Skiping {} unique dimensions that have no potential duplicates.", unique_dims.len().separate_with_commas());         
-        }
 
-        if !dim_groups.is_empty() {
-            println!("  Quick sampling of {} groups of dimensions.", dim_groups.len());
-        }        
         // Sort by width, then height
         dim_groups.sort_by(|((w1, h1), _), ((w2, h2), _)| (w1, h1).cmp(&(w2, h2)));
         
@@ -176,8 +168,7 @@ fn main() -> Result<(), anyhow::Error> {
                 continue;
             }
             
-            println!("Found {} potential duplicates. Starting deep comparison...", 
-                    potential_duplicates.len());
+            println!("{} potential duplicates. Switching to full compare...", potential_duplicates.len());
             
             // Step 5: Deep comparison for potential duplicates in this group
             let duplicates = find_duplicates(
@@ -188,8 +179,10 @@ fn main() -> Result<(), anyhow::Error> {
             
             let num_duplicates = duplicates.len();
             all_duplicates.extend(duplicates);
-            println!("  Found {} duplicates for {}x{} ({} total duplicates so far)",
-                    num_duplicates, width, height, all_duplicates.len().separate_with_commas());
+            if num_duplicates > 0 {
+                println!("                     {} duplicate(s) found ({} total duplicates so far)",
+                        num_duplicates, all_duplicates.len().separate_with_commas());
+            }
         }
     }
     
@@ -201,7 +194,7 @@ fn main() -> Result<(), anyhow::Error> {
         let mut sorted_duplicates = all_duplicates;
         sorted_duplicates.sort_by_key(|group| group.len());
         println!("\n========================================================");
-        println!("Found {} duplicates (sorted by size, smallest first):", sorted_duplicates.len().separate_with_commas());
+        println!("Found {} groups of duplicates", sorted_duplicates.len().separate_with_commas());
         for (i, group) in sorted_duplicates.iter().enumerate() {
             // Get dimensions of the first image in the group
             let dimensions = group.first()
@@ -278,7 +271,7 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
         
         for (ext, &count) in extensions {
             let marker = if processed_extensions.contains(&ext.as_str()) { "[X]" } else { "[ ]" };
-            println!("{} {:>6}: {}", marker, format!(".{}", ext), count.separate_with_commas());
+            println!("{} {:<6}: {}", marker, format!(".{}", ext), count.separate_with_commas());
         }
         println!(); // Add an extra newline for better readability
     }
@@ -494,8 +487,6 @@ fn find_duplicates(
     
     // Sort groups by size (smallest first)
     all_duplicates.sort_by_key(|group| group.len());
-    
-    pb.finish_with_message("Finished processing all groups");
     
     Ok(all_duplicates)
 }
