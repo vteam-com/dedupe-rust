@@ -80,6 +80,7 @@ fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
 }
 
 fn main() -> Result<(), anyhow::Error> {
+    let start_time = std::time::Instant::now();
     
     let args = Args::parse();
     println!("Scanning directory: {}", args.directory);
@@ -201,6 +202,13 @@ fn main() -> Result<(), anyhow::Error> {
             }
         }
     }
+    
+    let elapsed = start_time.elapsed();
+    let total_seconds = elapsed.as_secs();
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    println!("\nTotal execution time: {:02}:{:02}:{:02}", hours, minutes, seconds);
     
     Ok(())
 }
