@@ -430,15 +430,30 @@ fn find_duplicates(
             continue;
         }
         
+        let pb = ProgressBar::new(group.len() as u64);
+        pb.set_style(
+            ProgressStyle::with_template("Hashing images: [{bar:40.cyan/blue}] {pos}/{len} files ({eta})\n{msg}")
+            .unwrap()
+            .progress_chars("#=:-·")
+        );
+        
         let mut hash_map: HashMap<u64, Vec<PathBuf>> = HashMap::new();
         
         // Calculate hash for each image in the group
-        for path in group {
-            if let Ok(Some(img)) = load_image(&path) {
-                let hash = hash_image(&img);
-                hash_map.entry(hash).or_default().push(path);
+        for path in &group {
+            if let Some(filename) = path.file_name().and_then(|f| f.to_str()) {
+                pb.set_message(filename.to_string());
             }
+            
+            if let Ok(Some(img)) = load_image(path) {
+                let hash = hash_image(&img);
+                hash_map.entry(hash).or_default().push(path.clone());
+            }
+            
+            pb.inc(1);
         }
+        
+        pb.finish_with_message("Finished hashing");
         
         // Add groups with duplicates to the results
         for (_, mut files) in hash_map {
