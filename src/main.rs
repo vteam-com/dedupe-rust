@@ -52,31 +52,38 @@ struct Args {
 /// * `Some((width, height))` if the dimensions could be determined
 /// * `None` if the file is not a supported image format or could not be read
 fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
+    // First check if the file extension is supported
     let ext = path.extension()
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
     
-    let format = match ext.as_deref() {
-        Some("jpg") | Some("jpeg") => Some(ImageFormat::Jpeg),
-        Some("png") => Some(ImageFormat::Png),
-        Some("gif") => Some(ImageFormat::Gif),
-        Some("webp") => Some(ImageFormat::WebP),
-        _ => None,
-    };
-    
-    if let Some(format) = format {
-        if let Ok(file) = File::open(path) {
-            let reader = BufReader::new(file);
-            if let Ok(dimensions) = image::io::Reader::with_format(reader, format)
-                .with_guessed_format()
-                .map_err(|_| ())
-                .and_then(|r| Ok(r.into_dimensions().map_err(|_| ())?))
-            {
-                return Some(dimensions);
+    // Only try to get dimensions for supported image formats
+    match ext.as_deref() {
+        Some("jpg") | Some("jpeg") | Some("png") | Some("gif") | Some("webp") => {
+            // These are the formats we know how to handle
+            let format = match ext.as_deref() {
+                Some("jpg") | Some("jpeg") => ImageFormat::Jpeg,
+                Some("png") => ImageFormat::Png,
+                Some("gif") => ImageFormat::Gif,
+                Some("webp") => ImageFormat::WebP,
+                _ => return None, // This shouldn't happen due to the outer match
+            };
+            
+            if let Ok(file) = File::open(path) {
+                let reader = BufReader::new(file);
+                if let Ok(dimensions) = image::io::Reader::with_format(reader, format)
+                    .with_guessed_format()
+                    .map_err(|_| ())
+                    .and_then(|r| Ok(r.into_dimensions().map_err(|_| ())?))
+                {
+                    return Some(dimensions);
+                }
             }
-        }
+            None
+        },
+        // Skip unsupported formats entirely
+        _ => None
     }
-    None
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -236,16 +243,9 @@ fn main() -> Result<(), anyhow::Error> {
 /// * Processed for duplicates: jpg, jpeg, png, gif
 /// * Listed but not processed: bmp, tiff, tif, webp, heic, heif, raw, cr2, nef, arw, orf, rw2, svg, eps, ai, pdf, ico, dds, psd, xcf, exr, jp2
 fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
-    let all_image_extensions = [
-        // Processed formats (will be checked for duplicates)
-        "jpg", "jpeg", "png", "gif",
-        // Other known image formats (will be listed but not processed)
-        "bmp", "tiff", "tif", "webp", "heic", "heif", "raw", "cr2", "nef",
-        "arw", "orf", "rw2", "svg", "eps", "ai", "pdf", "ico", "dds",
-        "psd", "xcf", "exr", "jp2"
-    ];
-    
-    let processed_extensions = ["jpg", "jpeg", "png", "gif"];
+    // Only include formats we actually support for processing
+    let supported_extensions = ["jpg", "jpeg", "png", "gif", "webp"];
+    let processed_extensions = supported_extensions;
     let mut extension_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut image_files = Vec::new();
     
@@ -258,7 +258,7 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
             let ext_lower = ext.to_lowercase();
             *extension_counts.entry(ext_lower.clone()).or_default() += 1;
             
-            if all_image_extensions.contains(&ext_lower.as_str()) {
+            if supported_extensions.contains(&ext_lower.as_str()) {
                 image_files.push(entry.path().to_path_buf());
             }
         }
