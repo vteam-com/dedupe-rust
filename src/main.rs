@@ -31,48 +31,6 @@ struct Args {
     batch_size: usize,    
 }
 
-/// Gets the dimensions of an image file.
-///
-/// # Arguments
-/// * `path` - Path to the image file
-///
-/// # Returns
-/// * `Some((width, height))` if the dimensions could be determined
-/// * `None` if the file is not a supported image format or could not be read
-fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
-    // First check if the file extension is supported
-    let ext = path.extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_lowercase());
-    
-    // Only try to get dimensions for supported image formats
-    match ext.as_deref() {
-        Some("jpg") | Some("jpeg") | Some("png") | Some("gif") | Some("webp") => {
-            // These are the formats we know how to handle
-            let format = match ext.as_deref() {
-                Some("jpg") | Some("jpeg") => ImageFormat::Jpeg,
-                Some("png") => ImageFormat::Png,
-                Some("gif") => ImageFormat::Gif,
-                Some("webp") => ImageFormat::WebP,
-                _ => return None, // This shouldn't happen due to the outer match
-            };
-            
-            if let Ok(file) = File::open(path) {
-                let reader = BufReader::new(file);
-                if let Ok(dimensions) = image::io::Reader::with_format(reader, format)
-                    .with_guessed_format()
-                    .map_err(|_| ())
-                    .and_then(|r| Ok(r.into_dimensions().map_err(|_| ())?))
-                {
-                    return Some(dimensions);
-                }
-            }
-            None
-        },
-        // Skip unsupported formats entirely
-        _ => None
-    }
-}
 
 fn main() -> Result<(), anyhow::Error> {
     let start_time = std::time::Instant::now();
@@ -217,6 +175,7 @@ fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+
 /// Recursively finds all image files in the specified directory.
 ///
 /// # Arguments
@@ -273,79 +232,6 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
     Ok(image_files)
 }
 
-/// Computes a perceptual hash of an image for quick comparison.
-///
-/// This function creates a 64-bit hash that represents the visual content of the image
-/// by sampling the first 400 pixels. The hash is computed by:
-/// 1. Reading the first 1200-1600 bytes of the image (400 pixels × 3-4 bytes per pixel)
-/// 2. Converting each RGB pixel to a 24-bit value
-/// 3. Summing these values with proper bit shifting
-/// 4. Incorporating the image dimensions into the final hash
-///
-/// # Arguments
-/// * `path` - Path to the image file
-///
-/// # Returns
-/// * `Ok(String)` - A 16-character hexadecimal string representing the 64-bit hash
-/// * `Err(anyhow::Error)` - If there was an error reading or processing the image
-///
-/// # Notes
-/// - The hash is designed to be fast while providing reasonable uniqueness
-/// - Images with similar visual content will have similar hash values
-/// - The hash is sensitive to image dimensions and pixel values
-fn compute_checksum(path: &Path) -> Result<String, anyhow::Error> {
-    use std::fs::File;
-    use std::io::Read;
-
-    // Constants for the hash computation
-    const PIXELS_TO_SAMPLE: usize = 1000;
-    const BYTES_PER_PIXEL: usize = 3; // RGB
-    const BUFFER_SIZE: usize = PIXELS_TO_SAMPLE * BYTES_PER_PIXEL;
-    
-    // Read the initial portion of the image file
-    let mut file = File::open(path)
-        .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", path.display(), e))?;
-
-    let mut buffer = vec![0u8; BUFFER_SIZE];
-    let bytes_read = file.read(&mut buffer)?;
-    
-    if bytes_read == 0 {
-        return Ok("EMPTY_FILE".to_string());
-    }
-
-    // Get image dimensions for the final hash
-    let (width, height) = get_dimensions(path)
-        .ok_or_else(|| anyhow::anyhow!("Could not determine image dimensions"))?;
-
-    // Process pixels to compute the checksum
-    let (checksum, valid_pixels) = buffer
-        .chunks(BYTES_PER_PIXEL)
-        .take(PIXELS_TO_SAMPLE)
-        .filter_map(|chunk| {
-            if chunk.len() >= BYTES_PER_PIXEL {
-                Some((
-                    ((chunk[0] as u64) << 16) | ((chunk[1] as u64) << 8) | (chunk[2] as u64),
-                    1
-                ))
-            } else {
-                None
-            }
-        })
-        .fold((0u64, 0usize), |(sum, count), (pixel, valid)| {
-            (sum.wrapping_add(pixel), count + valid)
-        });
-
-    if valid_pixels == 0 {
-        return Ok("NO_VALID_PIXELS".to_string());
-    }
-
-    // Combine pixel data with image dimensions for final hash
-    let dim_hash = (width as u64) << 32 | (height as u64);
-    let final_hash = checksum.wrapping_mul(valid_pixels as u64) ^ dim_hash;
-
-    // Format as 16-character hex string (64 bits)
-    Ok(format!("{:016x}", final_hash))
-}
 
 /// Performs a quick scan of images to find potential duplicates.
 ///
@@ -430,6 +316,50 @@ fn quick_scan(files: &[PathBuf], _group_dims: (u32, u32), pb: ProgressBar) -> Re
     Ok(result)
 }
 
+
+/// Gets the dimensions of an image file.
+///
+/// # Arguments
+/// * `path` - Path to the image file
+///
+/// # Returns
+/// * `Some((width, height))` if the dimensions could be determined
+/// * `None` if the file is not a supported image format or could not be read
+fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
+    // First check if the file extension is supported
+    let ext = path.extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase());
+    
+    // Only try to get dimensions for supported image formats
+    match ext.as_deref() {
+        Some("jpg") | Some("jpeg") | Some("png") | Some("gif") | Some("webp") => {
+            // These are the formats we know how to handle
+            let format = match ext.as_deref() {
+                Some("jpg") | Some("jpeg") => ImageFormat::Jpeg,
+                Some("png") => ImageFormat::Png,
+                Some("gif") => ImageFormat::Gif,
+                Some("webp") => ImageFormat::WebP,
+                _ => return None, // This shouldn't happen due to the outer match
+            };
+            
+            if let Ok(file) = File::open(path) {
+                let reader = BufReader::new(file);
+                if let Ok(dimensions) = image::io::Reader::with_format(reader, format)
+                    .with_guessed_format()
+                    .map_err(|_| ())
+                    .and_then(|r| Ok(r.into_dimensions().map_err(|_| ())?))
+                {
+                    return Some(dimensions);
+                }
+            }
+            None
+        },
+        // Skip unsupported formats entirely
+        _ => None
+    }
+}
+
 /// Groups files with identical hashes together as potential duplicates.
 ///
 /// # Arguments
@@ -448,6 +378,80 @@ fn find_potential_duplicates(hashes: Vec<(PathBuf, String)>) -> Vec<Vec<PathBuf>
     hash_map.into_values()
         .filter(|group| group.len() > 1)
         .collect()
+}
+
+/// Computes a perceptual hash of an image for quick comparison.
+///
+/// This function creates a 64-bit hash that represents the visual content of the image
+/// by sampling the first 400 pixels. The hash is computed by:
+/// 1. Reading the first 1200-1600 bytes of the image (400 pixels × 3-4 bytes per pixel)
+/// 2. Converting each RGB pixel to a 24-bit value
+/// 3. Summing these values with proper bit shifting
+/// 4. Incorporating the image dimensions into the final hash
+///
+/// # Arguments
+/// * `path` - Path to the image file
+///
+/// # Returns
+/// * `Ok(String)` - A 16-character hexadecimal string representing the 64-bit hash
+/// * `Err(anyhow::Error)` - If there was an error reading or processing the image
+///
+/// # Notes
+/// - The hash is designed to be fast while providing reasonable uniqueness
+/// - Images with similar visual content will have similar hash values
+/// - The hash is sensitive to image dimensions and pixel values
+fn compute_checksum(path: &Path) -> Result<String, anyhow::Error> {
+    use std::fs::File;
+    use std::io::Read;
+
+    // Constants for the hash computation
+    const PIXELS_TO_SAMPLE: usize = 1000;
+    const BYTES_PER_PIXEL: usize = 3; // RGB
+    const BUFFER_SIZE: usize = PIXELS_TO_SAMPLE * BYTES_PER_PIXEL;
+    
+    // Read the initial portion of the image file
+    let mut file = File::open(path)
+        .map_err(|e| anyhow::anyhow!("Failed to open file {}: {}", path.display(), e))?;
+
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+    let bytes_read = file.read(&mut buffer)?;
+    
+    if bytes_read == 0 {
+        return Ok("EMPTY_FILE".to_string());
+    }
+
+    // Get image dimensions for the final hash
+    let (width, height) = get_dimensions(path)
+        .ok_or_else(|| anyhow::anyhow!("Could not determine image dimensions"))?;
+
+    // Process pixels to compute the checksum
+    let (checksum, valid_pixels) = buffer
+        .chunks(BYTES_PER_PIXEL)
+        .take(PIXELS_TO_SAMPLE)
+        .filter_map(|chunk| {
+            if chunk.len() >= BYTES_PER_PIXEL {
+                Some((
+                    ((chunk[0] as u64) << 16) | ((chunk[1] as u64) << 8) | (chunk[2] as u64),
+                    1
+                ))
+            } else {
+                None
+            }
+        })
+        .fold((0u64, 0usize), |(sum, count), (pixel, valid)| {
+            (sum.wrapping_add(pixel), count + valid)
+        });
+
+    if valid_pixels == 0 {
+        return Ok("NO_VALID_PIXELS".to_string());
+    }
+
+    // Combine pixel data with image dimensions for final hash
+    let dim_hash = (width as u64) << 32 | (height as u64);
+    let final_hash = checksum.wrapping_mul(valid_pixels as u64) ^ dim_hash;
+
+    // Format as 16-character hex string (64 bits)
+    Ok(format!("{:016x}", final_hash))
 }
 
 /// Groups images by their pixel data hash to find exact duplicates.
