@@ -31,146 +31,31 @@ struct Args {
     batch_size: usize,    
 }
 
-
 fn main() -> Result<(), anyhow::Error> {
     let start_time = std::time::Instant::now();
-    
     let args = Args::parse();
+
+    //-----------------------------------------
+    // step 1 find image files
     println!("🔍 Scanning {} for images...", args.directory);
+    let image_files = step_1_find_image_files(&args.directory)?;
     
-    // Step 1: Find all image files with progress
-    let image_files = find_image_files(&args.directory)?;
     if image_files.is_empty() {
         println!("❌ No image files found in the specified directory.");
-        return Ok(());
     }
-    
-    // Step 2: First group files by extension
-    let mut files_by_extension: std::collections::HashMap<String, Vec<PathBuf>> = std::collections::HashMap::new();
-    for file in &image_files {
-        if let Some(ext) = file.extension().and_then(|e| e.to_str()) {
-            files_by_extension.entry(ext.to_lowercase())
-                .or_default()
-                .push(file.clone());
-        }
+    else{        
+        //-----------------------------------------
+        // step 2 group and sort
+        let files_by_extension = step_2_group_files_by_extension(&image_files);
+        
+        //-----------------------------------------
+        // step 3 Process files by extension and find duplicates
+        let all_duplicates = step_3_process_extensions(files_by_extension)?;
+        
+        //-----------------------------------------
+        // Print results
+        step_4_print_results(all_duplicates, start_time);
     }
-    
-    // Sort extensions alphabetically for consistent processing    
-    let mut extensions: Vec<_> = files_by_extension.into_iter().collect();
-    extensions.sort_by_key(|(ext, _)| ext.clone());
-    
-    let mut all_duplicates: Vec<Vec<PathBuf>> = Vec::new();
-    
-    // Process each extension group separately
-    for (_ext_idx, (ext, ext_files)) in extensions.into_iter().enumerate() {
-        // Create a single progress bar for this extension type
-        // Total progress will be: 
-        // 1. Dimension analysis (1 per file)
-        // 2. Quick scan (1 per file)
-        // 3. Deep comparison (1 per potential duplicate group)
-        // We'll estimate the deep comparison count as 10% of files to avoid too many progress bar updates
-        let estimated_duplicates = (ext_files.len() as f32 * 0.1).max(1.0) as u64;
-        let total_work = (ext_files.len() * 2) as u64 + estimated_duplicates;
-        
-        let pb = ProgressBar::new(total_work);
-        pb.set_style(ProgressStyle::with_template("🔍 {prefix:.bold.dim} {bar:40.cyan/blue} {pos}/{len} {msg}")
-            .unwrap()
-            .progress_chars("#>·"));
-        pb.set_prefix(format!(".{}", ext));
-        pb.set_message("Starting...");
-        
-        // Group files of this extension by dimensions using parallel processing
-        let dimension_groups: std::collections::HashMap<(u32, u32), Vec<PathBuf>> = ext_files
-            .par_iter()
-            .filter_map(|file| {
-                pb.set_message("Analyzing dimensions...");
-                let dimensions = get_dimensions(file);
-                pb.inc(1);
-                dimensions.map(|d| (d, file.clone()))
-            })
-            .fold(
-                || std::collections::HashMap::<(u32, u32), Vec<PathBuf>>::new(),
-                |mut acc: std::collections::HashMap<(u32, u32), Vec<PathBuf>>, (dimensions, file)| {
-                    acc.entry(dimensions).or_default().push(file);
-                    acc
-                },
-            )
-            .reduce(
-                || std::collections::HashMap::<(u32, u32), Vec<PathBuf>>::new(),
-                |mut a: std::collections::HashMap<(u32, u32), Vec<PathBuf>>, mut b: std::collections::HashMap<(u32, u32), Vec<PathBuf>>| {
-                    for (k, v) in b.drain() {
-                        a.entry(k).or_default().extend(v);
-                    }
-                    a
-                },
-            );
-        
-        // Separate groups with potential duplicates from unique dimensions
-        let (mut dim_groups, _unique_dims): (Vec<_>, Vec<_>) = dimension_groups
-            .into_iter()
-            .partition(|(_, files)| files.len() >= 2);
-        
-        // Sort groups by size (smallest first)
-        dim_groups.sort_by_key(|(_, files): &(_, Vec<_>)| files.len());
-        
-
-        // Sort by width, then height
-        dim_groups.sort_by(|((w1, h1), _), ((w2, h2), _)| (w1, h1).cmp(&(w2, h2)));
-        
-        // Process each dimension group for this extension
-        for ((width, height), files) in dim_groups {
-            // Step 3: Quick scan with checksum for this dimension group
-            pb.set_message("Quick scanning...");
-            let quick_hashes = quick_scan(&files, (width, height), pb.clone())?;
-            
-            // Step 4: Find potential duplicates based on quick hashes
-            let potential_duplicates = find_potential_duplicates(quick_hashes);
-            
-            // Step 5: Deep comparison for potential duplicates in this group
-            pb.set_message("Deep comparing...");
-            let duplicates = find_duplicates(potential_duplicates)?;
-            all_duplicates.extend(duplicates);
-            
-            // Update progress for the deep comparison phase
-            // Use a small increment since we don't know exactly how many comparisons were made
-            pb.inc(1);
-        }
-    }
-    
-    // Print final results
-    if all_duplicates.is_empty() {
-        println!("\n✅ No duplicates found in {:.2?}", start_time.elapsed());
-    } else {
-        // Sort groups by size (smallest first)
-        let mut sorted_duplicates = all_duplicates;
-        sorted_duplicates.sort_by_key(|group| group.len());
-        println!("\n✨ Found {} groups of duplicates in {:.2?}", 
-            sorted_duplicates.len().separate_with_commas(), 
-            start_time.elapsed());
-        for (i, group) in sorted_duplicates.iter().enumerate() {
-            // Get dimensions of the first image in the group
-            let dimensions = group.first()
-                .and_then(|p| get_dimensions(p))
-                .map(|(w, h)| format!("{}x{}", w, h))
-                .unwrap_or_else(|| "unknown".to_string());
-            
-            println!("\nGroup {} ({} files, {}):", 
-                (i + 1).separate_with_commas(), 
-                group.len().separate_with_commas(),
-                dimensions
-            );
-            for path in group {
-                println!("  {}", path.display());
-            }
-        }
-    }
-    
-    let elapsed = start_time.elapsed();
-    let total_seconds = elapsed.as_secs();
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-    println!("\nTotal execution time: {:02}:{:02}:{:02}", hours, minutes, seconds);
     
     Ok(())
 }
@@ -188,7 +73,7 @@ fn main() -> Result<(), anyhow::Error> {
 /// # Supported Formats
 /// * Processed for duplicates: jpg, jpeg, png, gif
 /// * Listed but not processed: bmp, tiff, tif, webp, heic, heif, raw, cr2, nef, arw, orf, rw2, svg, eps, ai, pdf, ico, dds, psd, xcf, exr, jp2
-fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
+fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
     // Only include formats we actually support for processing
     let supported_extensions = ["jpg", "jpeg", "png", "gif", "webp"];
     let processed_extensions = supported_extensions;
@@ -231,6 +116,150 @@ fn find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
     
     Ok(image_files)
 }
+
+/// Groups files by their extension
+fn step_2_group_files_by_extension(files: &[PathBuf]) -> std::collections::HashMap<String, Vec<PathBuf>> {
+    let mut groups: std::collections::HashMap<_, Vec<PathBuf>> = std::collections::HashMap::new();
+    for file in files {
+        if let Some(ext) = file.extension().and_then(|e| e.to_str()) {
+            groups.entry(ext.to_lowercase())
+                .or_default()
+                .push(file.clone());
+        }
+    }
+    groups
+}
+
+/// Processes files grouped by extension to find duplicates
+fn step_3_process_extensions(
+    files_by_extension: std::collections::HashMap<String, Vec<PathBuf>>,
+) -> Result<Vec<Vec<PathBuf>>, anyhow::Error> {
+    let mut all_duplicates = Vec::new();
+    
+    // Sort extensions for consistent processing
+    let mut extensions: Vec<_> = files_by_extension.into_iter().collect();
+    extensions.sort_by_key(|(ext, _)| ext.clone());
+    
+    for (ext, ext_files) in extensions {
+        // Set up progress bar for this extension
+        let estimated_duplicates = (ext_files.len() as f32 * 0.1).max(1.0) as u64;
+        let total_work = (ext_files.len() * 2) as u64 + estimated_duplicates;
+        
+        let pb = ProgressBar::new(total_work);
+        pb.set_style(ProgressStyle::with_template("🔍 {prefix:.bold.dim} {bar:40.cyan/blue} {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("#>·"));
+        pb.set_prefix(format!(".{}", ext));
+        pb.set_message("Starting...");
+        
+        // Group files by dimensions and process potential duplicates
+        let dim_groups = group_by_dimensions(&ext_files, &pb);
+        
+        // Process each dimension group
+        for ((width, height), files) in dim_groups {
+            // Step 3: Quick scan with checksum for this dimension group
+            pb.set_message("Quick scanning...");
+            let quick_hashes = quick_scan(&files, (width, height), pb.clone())?;
+            
+            // Step 4: Find potential duplicates based on quick hashes
+            let potential_duplicates = find_potential_duplicates(quick_hashes);
+            
+            // Step 5: Deep comparison for potential duplicates in this group
+            pb.set_message("Deep comparing...");
+            let duplicates = find_duplicates(potential_duplicates)?;
+            all_duplicates.extend(duplicates);
+            
+            // Update progress for the deep comparison phase
+            pb.inc(1);
+        }
+    }
+    
+    Ok(all_duplicates)
+}
+
+/// Groups files by their dimensions and returns groups of potential duplicates
+fn group_by_dimensions(files: &[PathBuf], pb: &ProgressBar) -> Vec<((u32, u32), Vec<PathBuf>)> {
+    pb.set_message("Analyzing dimensions...");
+    
+    // Group files by their dimensions
+    let dimension_groups = files
+        .par_iter()
+        .filter_map(|file| {
+            let dimensions = get_dimensions(file);
+            pb.inc(1);
+            dimensions.map(|d| (d, file.clone()))
+        })
+        .fold(
+            || std::collections::HashMap::new(),
+            |mut acc, (dimensions, file)| {
+                acc.entry(dimensions).or_insert_with(Vec::new).push(file);
+                acc
+            },
+        )
+        .reduce(
+            || std::collections::HashMap::new(),
+            |mut a, mut b| {
+                for (k, v) in b.drain() {
+                    a.entry(k).or_default().extend(v);
+                }
+                a
+            },
+        );
+    
+    // Get groups with potential duplicates (2+ files with same dimensions)
+    let (mut dim_groups, _): (Vec<_>, _) = dimension_groups
+        .into_iter()
+        .partition(|(_, files)| files.len() >= 2);
+    
+    // Sort groups by count (smallest first) then by dimensions
+    dim_groups.sort_by(|(dims_a, files_a), (dims_b, files_b)| {
+        files_a.len().cmp(&files_b.len()).then_with(|| dims_a.cmp(dims_b))
+    });
+    
+    dim_groups
+}
+
+/// Prints the results of the duplicate search
+fn step_4_print_results(duplicates: Vec<Vec<PathBuf>>, start_time: std::time::Instant) {
+    if duplicates.is_empty() {
+        println!("\n✅ No duplicates found in {:.2?}", start_time.elapsed());
+        return;
+    }
+    
+    // Sort groups by size (smallest first)
+    let mut sorted_duplicates = duplicates;
+    sorted_duplicates.sort_by_key(|group| group.len());
+    
+    println!("\n✨ Found {} groups of duplicates in {:.2?}", 
+        sorted_duplicates.len().separate_with_commas(), 
+        start_time.elapsed());
+    
+    for (i, group) in sorted_duplicates.iter().enumerate() {
+        // Get dimensions of the first image in the group
+        let dimensions = group.first()
+            .and_then(|p| get_dimensions(p))
+            .map(|(w, h)| format!("{}x{}", w, h))
+            .unwrap_or_else(|| "unknown".to_string());
+        
+        println!("\nGroup {} ({} files, {}):", 
+            (i + 1).separate_with_commas(), 
+            group.len().separate_with_commas(),
+            dimensions
+        );
+        
+        for path in group {
+            println!("  {}", path.display());
+        }
+    }
+    
+    let elapsed = start_time.elapsed();
+    let total_seconds = elapsed.as_secs();
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    println!("\nTotal execution time: {:02}:{:02}:{:02}", hours, minutes, seconds);
+}
+
 
 
 /// Performs a quick scan of images to find potential duplicates.
