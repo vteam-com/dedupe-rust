@@ -12,7 +12,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use thousands::Separable;
 
 /// Command-line arguments for the duplicate image finder.
@@ -52,7 +51,7 @@ fn main() -> Result<(), anyhow::Error> {
         // step 3 Process files by extension and find duplicates
         let all_duplicates = step_3_process_extensions(files_by_extension)?;
         
-        //-----------------------------------------
+        // -----------------------------------------
         // Print results
         step_4_print_results(all_duplicates, start_time);
     }
@@ -148,26 +147,26 @@ fn step_3_process_extensions(
         let pb = ProgressBar::new(total_work);
         pb.set_style(ProgressStyle::with_template("🔍 {prefix:.bold.dim} {bar:40.cyan/blue} {pos}/{len} {msg}")
             .unwrap()
-            .progress_chars("#>·"));
-        pb.set_prefix(format!(".{}", ext));
-        pb.set_message("Starting...");
+            .progress_chars("#="));
         
         // Group files by dimensions and process potential duplicates
+        pb.set_message("Dimensions...");
         let dim_groups = group_by_dimensions(&ext_files, &pb);
         
         // Process each dimension group
         for ((width, height), files) in dim_groups {
+            pb.set_prefix(format!(".{:<6} ({:>7}x{:<7})", ext, width, height));
+
             // Step 3: Quick scan with checksum for this dimension group
-            pb.set_message("Quick scanning...");
             let quick_hashes = quick_scan(&files, (width, height), pb.clone())?;
             
             // Step 4: Find potential duplicates based on quick hashes
             let potential_duplicates = find_potential_duplicates(quick_hashes);
             
             // Step 5: Deep comparison for potential duplicates in this group
-            pb.set_message("Deep comparing...");
             let duplicates = find_duplicates(potential_duplicates)?;
             all_duplicates.extend(duplicates);
+            pb.set_message(format!("{} duplicates found", all_duplicates.len()));
             
             // Update progress for the deep comparison phase
             pb.inc(1);
@@ -211,9 +210,9 @@ fn group_by_dimensions(files: &[PathBuf], pb: &ProgressBar) -> Vec<((u32, u32), 
         .into_iter()
         .partition(|(_, files)| files.len() >= 2);
     
-    // Sort groups by count (smallest first) then by dimensions
-    dim_groups.sort_by(|(dims_a, files_a), (dims_b, files_b)| {
-        files_a.len().cmp(&files_b.len()).then_with(|| dims_a.cmp(dims_b))
+    // Sort groups by dimensions in descending order
+    dim_groups.sort_by(|(dims_a, _), (dims_b, _)| {
+        dims_a.cmp(dims_b)
     });
     
     dim_groups
@@ -290,7 +289,7 @@ fn step_4_print_results(duplicates: Vec<Vec<PathBuf>>, start_time: std::time::In
 /// * `Err(anyhow::Error)` - If there was an error processing any of the images
 fn quick_scan(files: &[PathBuf], _group_dims: (u32, u32), pb: ProgressBar) -> Result<Vec<(PathBuf, String)>, anyhow::Error> {
     use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize};
     use std::sync::Arc;
     use std::time::Instant;
 
@@ -307,7 +306,7 @@ fn quick_scan(files: &[PathBuf], _group_dims: (u32, u32), pb: ProgressBar) -> Re
         .par_iter()
         .map_init(
             || (processed.clone(), last_update.clone(), pb.clone()),
-            |(counter, last_update, pb), path| {
+            |(_counter, _last_update, _pb), path| {
                 // Process the file
                 let result = match compute_checksum(path) {
                     Ok(hash) => Ok((path.clone(), hash)),
@@ -317,25 +316,6 @@ fn quick_scan(files: &[PathBuf], _group_dims: (u32, u32), pb: ProgressBar) -> Re
                     }
                 };
 
-                // Update progress
-                let processed = counter.fetch_add(1, Ordering::Relaxed) + 1;
-                if processed % 10 == 0 || processed == total_files {
-                    let now = Instant::now();
-                    let should_update = {
-                        let mut last = last_update.lock().unwrap();
-                        if now.duration_since(*last).as_millis() > 100 {
-                            *last = now;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    
-                    if should_update {
-                        pb.inc(10);
-                        pb.set_message(format!("Quick scanning: {}/{} files", processed, total_files));
-                    }
-                }
 
                 result
             },
@@ -517,8 +497,6 @@ fn find_duplicates(
         .and_then(|e| e.to_str())
         .unwrap_or("");
         
-    // Track total number of duplicate files found
-    let total_duplicates = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let pb_dup = ProgressBar::new_spinner();
     // Remove the separate spinner bar since we'll show the count in the main progress bar
     drop(pb_dup);
@@ -526,8 +504,8 @@ fn find_duplicates(
     pb.set_style(
         ProgressStyle::with_template("🔍 {prefix:.bold.dim} {bar:40.cyan/blue} {pos}/{len} | {msg}")
         .unwrap()
-        .progress_chars("#=:"));
-    pb.set_prefix(format!("DeepCompare .{}", ext));
+        .progress_chars("#="));
+    pb.set_prefix(format!(".{:<7} DeepCompare", ext));
 
     // Process groups in parallel
     let results: Vec<Vec<Vec<PathBuf>>> = groups
@@ -561,14 +539,10 @@ fn find_duplicates(
             
             pb.inc(1);
             
-            if !group_duplicates.is_empty() {
-                // Calculate and update total number of duplicate files
-                let total_in_group: usize = group_duplicates.iter().map(|g| g.len() - 1).sum();
-                let current_total = total_duplicates.fetch_add(total_in_group, std::sync::atomic::Ordering::Relaxed) + total_in_group;
-                pb.set_message(format!("{} duplicates", current_total));
-                Some(group_duplicates)
-            } else {
+            if group_duplicates.is_empty() {
                 None
+            } else {
+                Some(group_duplicates)
             }
         })
         .collect();
