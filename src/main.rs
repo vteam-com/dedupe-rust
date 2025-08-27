@@ -49,7 +49,7 @@ fn main() -> Result<(), anyhow::Error> {
         
         //-----------------------------------------
         // step 3 Process files by extension and find duplicates
-        let all_duplicates = step_3_process_extensions(files_by_extension)?;
+        let all_duplicates = step_3_process_extensions(files_by_extension, image_files.len())?;
         
         // -----------------------------------------
         // Print results
@@ -74,7 +74,7 @@ fn main() -> Result<(), anyhow::Error> {
 /// * Listed but not processed: bmp, tiff, tif, webp, heic, heif, raw, cr2, nef, arw, orf, rw2, svg, eps, ai, pdf, ico, dds, psd, xcf, exr, jp2
 fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
     // Only include formats we actually support for processing
-    let supported_extensions = ["jpg", "jpeg", "png", "gif", "webp"];
+    let supported_extensions = ["bmp","jpg", "jpeg", "png", "gif", "webp"];
     let processed_extensions = supported_extensions;
     let mut extension_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut image_files = Vec::new();
@@ -96,9 +96,11 @@ fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Erro
     
     // Print summary of found extensions
     if !extension_counts.is_empty() {
-        println!("\nFound {} image files by extension: ",  image_files.len().separate_with_commas());
-        println!("   (sorted by count)");
-        println!("   ([X] Marked extensions will be checked for duplicates)");
+        let total_count = extension_counts.values().sum::<usize>();
+        println!("Found {} files found, ", total_count.separate_with_commas());
+        
+        let supported_count = image_files.len();
+        println!("{} [X] Marked extensions will be checked for duplicates.", supported_count.separate_with_commas());
         
         let mut extensions: Vec<_> = extension_counts.iter().collect();
         // Sort by count in descending order, then by extension name
@@ -132,25 +134,25 @@ fn step_2_group_files_by_extension(files: &[PathBuf]) -> std::collections::HashM
 /// Processes files grouped by extension to find duplicates
 fn step_3_process_extensions(
     files_by_extension: std::collections::HashMap<String, Vec<PathBuf>>,
+    total_files: usize,
 ) -> Result<Vec<Vec<PathBuf>>, anyhow::Error> {
     let mut all_duplicates = Vec::new();
     
-    // Sort extensions for consistent processing
+    // Sort extensions by number of files in ascending order
     let mut extensions: Vec<_> = files_by_extension.into_iter().collect();
-    extensions.sort_by_key(|(ext, _)| ext.clone());
+    extensions.sort_by(|(_, a), (_, b)| a.len().cmp(&b.len()));
     
     for (ext, ext_files) in extensions {
-        // Set up progress bar for this extension
-        let estimated_duplicates = (ext_files.len() as f32 * 0.1).max(1.0) as u64;
-        let total_work = (ext_files.len() * 2) as u64 + estimated_duplicates;
-        
-        let pb = ProgressBar::new(total_work);
-        pb.set_style(ProgressStyle::with_template("🔍 {prefix:.bold.dim} {bar:40.cyan/blue} {pos}/{len} {msg}")
+        println!("\n🔍 Processing: .{} - start", ext);
+        // Set up progress bar for overall progress
+        let pb = ProgressBar::new(total_files as u64);
+        pb.set_style(ProgressStyle::with_template("🔍 {prefix:.bold.dim} {bar:40.cyan/blue} {pos}/{len} files {msg}")
             .unwrap()
             .progress_chars("#="));
+            
+        pb.set_message(format!("Processing .{} ({}/{})", ext, ext_files.len(), total_files));
         
         // Group files by dimensions and process potential duplicates
-        pb.set_message("Dimensions...");
         let dim_groups = group_by_dimensions(&ext_files, &pb);
         
         // Process each dimension group
@@ -171,6 +173,7 @@ fn step_3_process_extensions(
             // Update progress for the deep comparison phase
             pb.inc(1);
         }
+        println!("\n🔍 Processing: .{} - end", ext);
     }
     
     Ok(all_duplicates)
@@ -488,8 +491,10 @@ fn find_duplicates(
         hasher.finish()
     }
 
+    // Calculate total number of files to process
+    let total_files = groups.iter().map(|g| g.len()).sum::<usize>();
     // Create a progress bar for the entire operation
-    let pb = ProgressBar::new(groups.len() as u64);
+    let pb = ProgressBar::new(total_files as u64);
     // Get the file extension from the first file in the first group
     let ext = groups.first()
         .and_then(|g| g.first())
