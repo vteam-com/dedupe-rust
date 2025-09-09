@@ -12,6 +12,7 @@ A high-performance command-line tool to find and manage duplicate images in your
 - 🔢 Batch processing for memory efficiency
 - 📋 Clean, organized output with file type breakdown
 - 🔍 Smart filtering by image dimensions before comparison
+- 📝 Multiple output formats (Plain text and JSON)
 
 ## Installation
 
@@ -65,6 +66,63 @@ OPTIONS:
     -b, --batch-size <BATCH_SIZE>  Number of images to process in each batch (default: 1000)
     -h, --help                     Print help
     -V, --version                  Print version
+```
+
+### Output Formats
+
+The tool supports two output formats:
+
+1. **Plain Text (Default)**
+   - Human-readable format with grouped duplicates
+   - Shows file paths and image dimensions
+   - Example:
+     ```
+     ✨ Found 2 groups of duplicates in 1.23s
+     
+     Group 1 (3 files, 800x600):
+       /path/to/image1.jpg
+       /path/to/image2.jpg
+       /path/to/image3.jpg
+     
+     Group 2 (2 files, 1920x1080):
+       /path/to/image4.jpg
+       /path/to/image5.jpg
+     ```
+
+2. **JSON**
+   - Machine-readable format for programmatic use
+   - Includes all information in a structured format
+   - Example:
+     ```json
+     {
+       "groups": [
+         {
+           "files": [
+             "/path/to/image1.jpg",
+             "/path/to/image2.jpg",
+             "/path/to/image3.jpg"
+           ],
+           "dimensions": "800x600"
+         },
+         {
+           "files": [
+             "/path/to/image4.jpg",
+             "/path/to/image5.jpg"
+           ],
+           "dimensions": "1920x1080"
+         }
+       ],
+       "total_groups": 2,
+       "execution_time": "00:00:01.23"
+     }
+     ```
+
+When you run the tool, it will prompt you to select your preferred output format:
+```
+Select output format:
+1) Plain text
+2) JSON
+Enter your choice (1-2): 
 ```
 
 
