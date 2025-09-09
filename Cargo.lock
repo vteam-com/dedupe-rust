@@ -643,6 +643,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dedupe_rust"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "colored",
+ "env_logger",
+ "flamegraph",
+ "image",
+ "indicatif 0.17.11",
+ "libheif-rs",
+ "log",
+ "rayon",
+ "sha2",
+ "thiserror 1.0.69",
+ "thousands",
+ "walkdir",
+]
+
+[[package]]
 name = "deranged"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -690,26 +710,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "duplicate_image_finder"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "clap",
- "colored",
- "env_logger",
- "flamegraph",
- "image",
- "indicatif 0.17.11",
- "libheif-rs",
- "log",
- "rayon",
- "sha2",
- "thiserror 1.0.69",
- "thousands",
- "walkdir",
 ]
 
 [[package]]

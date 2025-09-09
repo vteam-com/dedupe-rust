@@ -1,5 +1,5 @@
 [package]
-name = "duplicate_image_finder"
+name = "dedupe_rust"
 version = "0.1.1"
 edition = "2021"
 

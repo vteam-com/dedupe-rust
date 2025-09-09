@@ -23,7 +23,7 @@
             "type": "lldb",
             "request": "launch",
             "name": "Debug with Custom Dir",
-            "program": "${workspaceFolder}/target/debug/duplicate_image_finder.exe",
+            "program": "${workspaceFolder}/target/debug/dedupe_rust.exe",
             "args": [
                 "${input:args}"
             ],
@@ -34,7 +34,7 @@
             "type": "lldb",
             "request": "launch",
             "name": "Release with Custom Dir",
-            "program": "${workspaceFolder}/target/release/duplicate_image_finder.exe",
+            "program": "${workspaceFolder}/target/release/dedupe_rust.exe",
             "args": [
                 "${input:args}"
             ],
