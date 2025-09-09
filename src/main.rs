@@ -5,15 +5,28 @@
 
 use anyhow::Result;
 use clap::Parser;
+use chrono::Local;
 use image::DynamicImage;
 use libheif_rs::{HeifContext, LibHeif, ColorSpace, RgbChroma};
 use rayon::prelude::*;
 use rayon::iter::IntoParallelRefIterator;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use std::io::{self, Write};
 use serde::Serialize;
 use thousands::Separable;
+
+#[derive(Debug, Serialize)]
+struct DuplicateGroup {
+    files: Vec<String>,
+    dimensions: String,
+}
+
+#[derive(Debug, Serialize)]
+struct Results {
+    groups: Vec<DuplicateGroup>,
+    total_groups: usize,
+    execution_time: String,
+}
 
 mod dimensions;
 
@@ -219,148 +232,85 @@ fn step_3_process_extensions(
     Ok(all_duplicates)
 }
 
-
-/// Prompts the user to select an output format
-fn prompt_output_format() -> io::Result<String> {
-    println!("Select output format:");
-    println!("1) Plain text");
-    println!("2) JSON");
-    print!("Enter your choice (1-2): ");
-    io::stdout().flush()?;
-    
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    
-    match input.trim() {
-        "1" => Ok("plain".to_string()),
-        "2" => Ok("json".to_string()),
-        _ => {
-            println!("Invalid choice. Defaulting to plain text.");
-            Ok("plain".to_string())
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct DuplicateGroup {
-    files: Vec<String>,
-    dimensions: String,
-}
-
-#[derive(Serialize)]
-struct Results {
-    groups: Vec<DuplicateGroup>,
-    total_groups: usize,
-    execution_time: String,
-}
-
-/// Prints the results of the duplicate search in the specified format
+/// Prints the results of the duplicate search and saves to a JSON file
 fn step_4_print_results(duplicates: &[Vec<PathBuf>], start_time: Instant) {
-    // Prompt for output format
-    let format = match prompt_output_format() {
-        Ok(fmt) => fmt,
-        Err(e) => {
-            eprintln!("Error getting output format: {}. Using plain text.", e);
-            "plain".to_string()
-        }
-    };
+    let formatted_time = format!("{:.2?}", start_time.elapsed());
     
     if duplicates.is_empty() {
-        let message = format!("\n✅ No duplicates found in {:.2?}", start_time.elapsed());
-        if format == "json" {
-            let results = Results {
-                groups: Vec::new(),
-                total_groups: 0,
-                execution_time: format!("{:.2?}", start_time.elapsed()),
-            };
-            if let Ok(json) = serde_json::to_string_pretty(&results) {
-                println!("{}", json);
-            } else {
-                println!("{}", message);
-            }
-        } else {
-            println!("{}", message);
-        }
-        return;
-    }
-    
-    // Sort groups by size (smallest first)
-    let mut sorted_duplicates = duplicates.to_vec();
-    sorted_duplicates.sort_by_key(|group| group.len());
-    
-    let elapsed = start_time.elapsed();
-    let total_seconds = elapsed.as_secs();
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-    let formatted_time = format!("{:02}:{:02}:{:02}", hours, minutes, seconds);
-    
-    if format == "json" {
-        let mut groups = Vec::new();
-        
-        for group in &sorted_duplicates {
-            let dimensions = group.first()
-                .and_then(|p| dimensions::get_dimensions(p))
-                .map(|(w, h)| format!("{}x{}", w, h))
-                .unwrap_or_else(|| "unknown".to_string());
-                
-            let files: Vec<String> = group.iter()
-                .map(|p| p.display().to_string())
-                .collect();
-                
-            groups.push(DuplicateGroup {
-                files,
-                dimensions,
-            });
-        }
-        
+        let message = format!("\n✅ No duplicates found in {}", formatted_time);
         let results = Results {
-            groups,
-            total_groups: sorted_duplicates.len(),
+            groups: Vec::new(),
+            total_groups: 0,
             execution_time: formatted_time,
         };
         
+        // Generate filename with timestamp
+        let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+        let filename = format!("dedupe_{}.json", timestamp);
+        
+        // Save empty results to JSON file
         if let Ok(json) = serde_json::to_string_pretty(&results) {
-            println!("{}", json);
+            if let Err(e) = std::fs::write(&filename, &json) {
+                eprintln!("Error writing to JSON file: {}", e);
+            } else {
+                println!("\nResults saved to: {}", filename);
+            }
+        }
+        
+        println!("{}", message);
+        return;
+    }
+
+    let mut sorted_duplicates = duplicates.to_vec();
+    sorted_duplicates.sort_by(|a, b| {
+        let a_path = a.first().map(|p| p.as_path()).unwrap_or_else(|| Path::new(""));
+        let b_path = b.first().map(|p| p.as_path()).unwrap_or_else(|| Path::new(""));
+        a_path.cmp(b_path)
+    });
+    
+    // Prepare the results
+    let results = Results {
+        groups: sorted_duplicates.iter()
+            .map(|group| {
+                let dimensions = group.first()
+                    .and_then(|p| dimensions::get_dimensions(p))
+                    .map(|(w, h)| format!("{}x{}", w, h))
+                    .unwrap_or_else(|| "unknown".to_string());
+                
+                DuplicateGroup {
+                    files: group.iter()
+                        .map(|p| p.display().to_string())
+                        .collect(),
+                    dimensions,
+                }
+            })
+            .collect(),
+        total_groups: sorted_duplicates.len(),
+        execution_time: formatted_time.clone(),
+    };
+    
+    // Generate filename with timestamp
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let filename = format!("dedupe_{}.json", timestamp);
+    
+    if let Ok(json) = serde_json::to_string_pretty(&results) {
+        if let Err(e) = std::fs::write(&filename, &json) {
+            eprintln!("Error writing to JSON file: {}", e);
         } else {
-            println!("Error formatting results as JSON");
-            print_results_plain(&sorted_duplicates, start_time);
+            println!("\nResults saved to: {}", filename);
         }
     } else {
-        print_results_plain(&sorted_duplicates, start_time);
+        eprintln!("Error serializing results to JSON");
     }
-}
-
-/// Prints results in plain text format
-fn print_results_plain(duplicates: &[Vec<PathBuf>], start_time: Instant) {
-    println!("\n✨ Found {} groups of duplicates in {:.2?}", 
+    
+    // Print summary to console
+    println!("\n✨ Found {} images in {} groups of duplicates.", 
+        // total files in all groups
+        duplicates.iter().map(|group| group.len()).sum::<usize>().separate_with_commas(), 
         duplicates.len().separate_with_commas(), 
-        start_time.elapsed());
-    
-    for (i, group) in duplicates.iter().enumerate() {
-        // Get dimensions of the first image in the group
-        let dimensions = group.first()
-            .and_then(|p| dimensions::get_dimensions(p))
-            .map(|(w, h)| format!("{}x{}", w, h))
-            .unwrap_or_else(|| "unknown".to_string());
-        
-        println!("\nGroup {} ({} files, {}):", 
-            (i + 1).separate_with_commas(), 
-            group.len().separate_with_commas(),
-            dimensions
         );
-        
-        for path in group {
-            println!("  {}", path.display());
-        }
-    }
-    
-    let elapsed = start_time.elapsed();
-    let total_seconds = elapsed.as_secs();
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
-    println!("\nTotal execution time: {:02}:{:02}:{:02}", hours, minutes, seconds);
+
+    println!("Time to complete: {}", formatted_time);
 }
 
 /// Groups files by their dimensions and returns groups of potential duplicates
