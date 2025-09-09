@@ -10,7 +10,7 @@ use clap::Parser;
 use image::{DynamicImage, ImageFormat};
 use indicatif::{ProgressBar, ProgressStyle, HumanCount};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use thousands::Separable;
 
@@ -87,49 +87,58 @@ fn main() -> Result<(), anyhow::Error> {
 /// * Listed but not processed: bmp, tiff, tif, raw, cr2, nef, arw, orf, rw2, svg, eps, ai, pdf, ico, dds, psd, xcf, exr, jp2
 fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
     // Define supported image extensions
-    let processed_extensions = ["bmp", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif"];
+    let processed_extensions = ["bmp", "jpg", "jpeg", "png", "gif", "webp"]; //, "heic", "heif"];
     // All supported extensions (including detected but not processed)
-    let known_image_extensions = ["bmp", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "tiff", "tif", "raw", "cr2", "nef", "arw", "orf", "rw2", "svg", "eps", "ai", "pdf", "ico", "dds", "psd", "xcf", "exr", "jp2"];
+    let _known_image_extensions = ["bmp", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "tiff", "tif", "raw", "cr2", "nef", "arw", "orf", "rw2", "svg", "eps", "ai", "pdf", "ico", "dds", "psd", "xcf", "exr", "jp2"];
     let mut extension_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut image_files = Vec::new();
     
     for entry in walkdir::WalkDir::new(directory)
         .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| !e.file_type().is_dir()) {
-            
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
         if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
             let ext_lower = ext.to_lowercase();
-            *extension_counts.entry(ext_lower.clone()).or_default() += 1;
-            
-            if known_image_extensions.contains(&ext_lower.as_str()) {
+            // Only add to image_files if it's in our processed_extensions list
+            if processed_extensions.contains(&ext_lower.as_str()) {
                 image_files.push(entry.path().to_path_buf());
             }
+            // Still count all image extensions for the report
+            *extension_counts.entry(ext_lower).or_insert(0) += 1;
         }
     }
     
     // Print summary of found extensions
     if !extension_counts.is_empty() {
         let total_count = extension_counts.values().sum::<usize>();
-        println!("Found {} files found, ", total_count.separate_with_commas());
-        
         let supported_count = image_files.len();
-        println!("{} type of files found.", supported_count.separate_with_commas());
         
+        println!("\nFound {} total files in directory", total_count.separate_with_commas());
+        println!("Processing {} files with supported extensions:", supported_count.separate_with_commas());
+        
+        // Sort extensions by count in descending order, then by extension name
         let mut extensions: Vec<_> = extension_counts.iter().collect();
-        // Sort by count in descending order, then by extension name
         extensions.sort_by(|(a_ext, a_count), (b_ext, b_count)| 
-            a_count.cmp(b_count).then_with(|| b_ext.cmp(a_ext))
+            b_count.cmp(a_count).then_with(|| a_ext.cmp(b_ext))
         );
         
         use colored::*;
         for (ext, &count) in extensions {
-            let (marker, ext_display) = if processed_extensions.contains(&ext.as_str()) {
-                ("[SUPPORTED]".green().bold(), format!(".{}", ext).green())
+            let is_supported = processed_extensions.contains(&ext.as_str());
+            let (marker, ext_display) = if is_supported {
+                ("[PROCESSING]".green().bold(), format!(".{}", ext).green())
             } else {
-                ("[skipping ]".yellow(), format!(".{}", ext).yellow())
+                ("[ SKIPPING ]".dimmed(), format!(".{}", ext).dimmed())
             };
-            println!("{} {:<6}: {}", marker, ext_display, count.separate_with_commas());
+            println!("{} {:<6}: {} files", marker, ext_display, count.separate_with_commas());
+        }
+        
+        if supported_count == 0 {
+            println!("\n{} No files with supported extensions found in the specified directory.", 
+                "Warning:".yellow().bold());
+            println!("Supported extensions are: {}", 
+                processed_extensions.iter().map(|e| format!(".{}", e)).collect::<Vec<_>>().join(", "));
         }
         println!(); // Add an extra newline for better readability
     }
@@ -173,12 +182,12 @@ fn step_3_process_extensions(
     for (ext, ext_files) in extensions {
         println!("\n🔍 Processing: .{} - start", ext);
         
-        // Group files by dimensions and process potential duplicates
+        // Group files by extension and dimensions
         let dim_groups = group_by_dimensions(&ext_files, &pb);
         
         // Process each dimension group
-        for ((width, height), files) in dim_groups {
-            pb.set_prefix(format!(".{:<6} ({:>7}x{:<7})", ext, width, height));
+        for ((ext, width, height), files) in dim_groups {
+            pb.set_prefix(format!(".{:<6} ({:>7} x {:<7})[{} files]", ext, width, height, files.len()));
             pb.set_message(format!("{}/{} files - {} duplicates found", 
                 HumanCount(processed_files as u64),
                 HumanCount(total_files as u64),
@@ -186,12 +195,15 @@ fn step_3_process_extensions(
             ));
 
             // Step 3: Quick scan with checksum for this dimension group
-            let quick_hashes = quick_scan(&files, (width, height), &pb)?;
+            println!("quick_scan");
+            let quick_hashes = quick_scan(&files, width, height, &pb)?;
             
             // Step 4: Find potential duplicates based on quick hashes
+            println!("find_potential_duplicates");
             let potential_duplicates = find_potential_duplicates(quick_hashes);
             
             // Step 5: Deep comparison for potential duplicates in this group
+            println!("find_duplicates");
             let duplicates = find_duplicates(potential_duplicates, &pb)?;
             all_duplicates.extend(duplicates);
             
@@ -211,21 +223,32 @@ fn step_3_process_extensions(
 }
 
 /// Groups files by their dimensions and returns groups of potential duplicates
-fn group_by_dimensions(files: &[PathBuf], pb: &ProgressBar) -> Vec<((u32, u32), Vec<PathBuf>)> {
+fn group_by_dimensions(files: &[PathBuf], pb: &ProgressBar) -> Vec<((String, u32, u32), Vec<PathBuf>)> {
     pb.set_message("Analyzing dimensions...");
     
-    // Group files by their dimensions
+    // Group files by their extension and dimensions
     let dimension_groups = files
         .par_iter()
         .filter_map(|file| {
+            // Get file extension
+            let ext = file.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+                
+            // Get dimensions
             let dimensions = get_dimensions(file);
             pb.inc(1);
-            dimensions.map(|d| (d, file.clone()))
+            
+            // Return (extension, dimensions, file) tuple
+            dimensions.map(|d| ((ext, d.0, d.1), file.clone()))
         })
         .fold(
             || std::collections::HashMap::new(),
-            |mut acc, (dimensions, file)| {
-                acc.entry(dimensions).or_insert_with(Vec::new).push(file);
+            |mut acc, ((ext, width, height), file)| {
+                acc.entry((ext, width, height))
+                    .or_insert_with(Vec::new)
+                    .push(file);
                 acc
             },
         )
@@ -239,14 +262,19 @@ fn group_by_dimensions(files: &[PathBuf], pb: &ProgressBar) -> Vec<((u32, u32), 
             },
         );
     
-    // Get groups with potential duplicates (2+ files with same dimensions)
+    // Get groups with potential duplicates (2+ files with same dimensions and extension)
     let (mut dim_groups, _): (Vec<_>, _) = dimension_groups
         .into_iter()
         .partition(|(_, files)| files.len() >= 2);
     
-    // Sort groups by dimensions in descending order
-    dim_groups.sort_by(|(dims_a, _), (dims_b, _)| {
-        dims_a.cmp(dims_b)
+    // Sort the dimension groups by extension, then width, then height
+    dim_groups.sort_by(|((a_ext, a_w, a_h), _), ((b_ext, b_w, b_h), _)| {
+        // First sort by extension
+        a_ext.cmp(b_ext)
+            // Then by width
+            .then(a_w.cmp(b_w))
+            // Then by height
+            .then(a_h.cmp(b_h))
     });
     
     dim_groups
@@ -303,25 +331,14 @@ fn step_4_print_results(duplicates: Vec<Vec<PathBuf>>, start_time: std::time::In
 ///
 /// # Arguments
 /// * `files` - Slice of image file paths to process
-/// * `sample_size` - Number of pixels to use for the perceptual hash
-/// * `group_dims` - The dimensions (width, height) that all images in this group share
+/// * `width` - The width of all images in this group
+/// * `height` - The height of all images in this group
+/// * `pb` - Progress bar for reporting progress
 ///
 /// # Returns
 /// * `Ok(Vec<(PathBuf, String)>)` - Vector of (file path, hash) tuples
 /// * `Err(anyhow::Error)` - If there was an error processing any of the images
-/// Performs a parallel quick scan of images to find potential duplicates.
-///
-/// This function processes images in parallel using Rayon and computes their perceptual hashes.
-/// It's designed to be memory efficient by processing files in chunks.
-///
-/// # Arguments
-/// * `files` - Slice of image file paths to process
-/// * `group_dims` - The dimensions (width, height) that all images in this group share
-///
-/// # Returns
-/// * `Ok(Vec<(PathBuf, String)>)` - Vector of (file path, hash) tuples
-/// * `Err(anyhow::Error)` - If there was an error processing any of the images
-fn quick_scan(files: &[PathBuf], _group_dims: (u32, u32), pb: &ProgressBar) -> Result<Vec<(PathBuf, String)>, anyhow::Error> {
+fn quick_scan(files: &[PathBuf], _width: u32, _height: u32, pb: &ProgressBar) -> Result<Vec<(PathBuf, String)>, anyhow::Error> {
     use rayon::prelude::*;
     
     if files.is_empty() {
@@ -350,6 +367,141 @@ fn quick_scan(files: &[PathBuf], _group_dims: (u32, u32), pb: &ProgressBar) -> R
 }
 
 
+/// Gets the dimensions of a JPEG file by reading minimal header data.
+/// This is much faster than decoding the entire image.
+fn get_jpeg_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+    
+    let mut buffer = [0u8; 2];
+    if file.read_exact(&mut buffer).is_err() || buffer != [0xFF, 0xD8] {
+        return None; // Not a valid JPEG file
+    }
+    
+    // Read through the file until we find an SOF (Start of Frame) marker
+    let mut buffer = [0u8; 4];
+    loop {
+        if file.read_exact(&mut buffer[0..2]).is_err() {
+            return None;
+        }
+        
+        // Check for marker (0xFF)
+        if buffer[0] != 0xFF {
+            continue;
+        }
+        
+        // Skip padding bytes (0xFF)
+        while buffer[1] == 0xFF {
+            if file.read_exact(&mut buffer[1..2]).is_err() {
+                return None;
+            }
+        }
+        
+        // Check for SOF markers (0xC0-0xCF except 0xC4, 0xC8, 0xCC)
+        if (0xC0..=0xCF).contains(&buffer[1]) && buffer[1] != 0xC4 && buffer[1] != 0xC8 && buffer[1] != 0xCC {
+            // Read the length of the segment
+            if file.read_exact(&mut buffer[0..2]).is_err() {
+                return None;
+            }
+            #[allow(unused_variables)]
+            let length = u16::from_be_bytes([buffer[0], buffer[1]]) as usize;
+            
+            // Skip precision byte
+            if file.read_exact(&mut buffer[0..1]).is_err() {
+                return None;
+            }
+            
+            // Read height and width (2 bytes each, big-endian)
+            let mut dims = [0u8; 4];
+            if file.read_exact(&mut dims).is_err() {
+                return None;
+            }
+            
+            let height = u16::from_be_bytes([dims[0], dims[1]]) as u32;
+            let width = u16::from_be_bytes([dims[2], dims[3]]) as u32;
+            return Some((width, height));
+        } else {
+            // Skip this marker segment
+            if file.read_exact(&mut buffer[0..2]).is_err() {
+                return None;
+            }
+            let length = u16::from_be_bytes([buffer[0], buffer[1]]) as i64;
+            if file.seek(SeekFrom::Current(length - 2)).is_err() {
+                return None;
+            }
+        }
+    }
+}
+
+/// Gets the dimensions of a WebP file by reading the header.
+fn get_webp_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+    
+    // Read RIFF header (12 bytes)
+    let mut header = [0u8; 30];
+    if file.read_exact(&mut header).is_err() {
+        return None;
+    }
+    
+    // Check RIFF header and WebP signature
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WEBP" {
+        return None;
+    }
+    
+    // Check for VP8 or VP8L/VP8X format
+    if &header[12..16] == b"VP8 " && header[20] == 0x2A {
+        // VP8 (lossy) format
+        let width = u16::from_le_bytes([header[26], header[27] & 0x3F]) as u32;
+        let height = u16::from_le_bytes([header[28], header[29] & 0x3F]) as u32;
+        return Some((width, height));
+    } else if &header[12..16] == b"VP8L" {
+        // VP8L (lossless) format
+        if header[20] != 0x2F {
+            return None;
+        }
+        let b1 = header[21] as u32;
+        let b2 = header[22] as u32;
+        let b3 = header[23] as u32;
+        let b4 = header[24] as u32;
+        
+        let width = (b1 | ((b2 & 0x3F) << 8)) + 1;
+        let height = (((b2 >> 6) | (b3 << 2) | ((b4 & 0x03) << 10))) + 1;
+        return Some((width, height));
+    } else if &header[12..16] == b"VP8X" {
+        // VP8X (extended) format
+        let width = 1 + (((header[24] as u32) | ((header[25] as u32) << 8) | ((header[26] as u32) << 16)) & 0xFFFFFF);
+        let height = 1 + (((header[27] as u32) | ((header[28] as u32) << 8) | ((header[29] as u32) << 16)) & 0xFFFFFF);
+        return Some((width, height));
+    }
+    
+    None
+}
+
+/// Gets the dimensions of a PNG file by reading just the header.
+/// Uses the optimized png crate for better performance.
+fn get_png_dimensions(path: &Path) -> Option<(u32, u32)> {
+    use std::io::BufReader;
+    
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+    
+    let decoder = png::Decoder::new(BufReader::new(file));
+    let reader = match decoder.read_info() {
+        Ok(reader) => reader,
+        Err(_) => return None,
+    };
+    
+    let info = reader.info();
+    Some((info.width, info.height))
+}
+
 /// Gets the dimensions of an image file.
 ///
 /// # Arguments
@@ -369,34 +521,29 @@ fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
         if ext.eq_ignore_ascii_case("heic") || ext.eq_ignore_ascii_case("heif") {
             match get_heic_dimensions(path) {
                 Ok(Some(dims)) => return Some(dims),
-                Ok(None) => return None,
+                Ok(None) => {
+                    log::debug!("Could not read dimensions from HEIC file: {}", path.display());
+                    return None;
+                },
                 Err(e) => {
-                    eprintln!("⚠️  Warning: Could not read HEIC dimensions from {}: {}", path.display(), e);
+                    log::warn!("Error processing HEIC file {}: {}", path.display(), e);
                     return None;
                 }
             }
         }
     }
 
-    
-    // Handle other image formats
+    // Handle formats with optimized dimension detection first
     match ext.as_deref() {
-        Some("jpg") | Some("jpeg") | Some("png") | Some("gif") | Some("webp") => {
-            // These are the formats we know how to handle
-            let format = match ext.as_deref() {
-                Some("jpg") | Some("jpeg") => ImageFormat::Jpeg,
-                Some("png") => ImageFormat::Png,
-                Some("gif") => ImageFormat::Gif,
-                Some("webp") => ImageFormat::WebP,
-                _ => return None, // This shouldn't happen due to the outer match
-            };
-            
+        Some("jpg") | Some("jpeg") => return get_jpeg_dimensions(path),
+        Some("png") => return get_png_dimensions(path),
+        Some("webp") => return get_webp_dimensions(path),
+        Some("gif") => {
+            // For GIF, we'll use the image crate as it's already quite efficient
             if let Ok(file) = File::open(path) {
                 let reader = BufReader::new(file);
-                if let Ok(dimensions) = image::ImageReader::with_format(reader, format)
-                    .with_guessed_format()
-                    .map_err(|_| ())
-                    .and_then(|r| Ok(r.into_dimensions().map_err(|_| ())?))
+                if let Ok(dimensions) = image::ImageReader::with_format(reader, ImageFormat::Gif)
+                    .into_dimensions()
                 {
                     return Some(dimensions);
                 }
@@ -505,10 +652,11 @@ fn compute_checksum(path: &Path) -> Result<String, anyhow::Error> {
 /// Groups images by their pixel data hash to find exact duplicates.
 ///
 /// This function calculates a hash for each image's pixel data and groups
-/// images with identical hashes together, making it O(n) complexity.
+/// images with identical hashes together. It ensures that only files with
+/// the same extension are compared.
 ///
 /// # Arguments
-/// * `groups` - Groups of potentially duplicate images
+/// * `groups` - Groups of potentially duplicate images (already grouped by extension and dimensions)
 ///
 /// # Returns
 /// * `Ok(Vec<Vec<PathBuf>>)` - Groups of confirmed duplicate images
@@ -518,12 +666,17 @@ fn find_duplicates(
     pb: &ProgressBar
 ) -> Result<Vec<Vec<PathBuf>>, anyhow::Error> {
     use std::collections::HashMap;
-    use std::hash::{Hash, Hasher};
     use rayon::prelude::*;
 
-    // A simple hash function for image data
-    fn hash_image(img: &DynamicImage) -> u64 {
+    // A simple hash function for image data that includes the file extension
+    fn hash_image(img: &DynamicImage, path: &Path) -> u64 {
+        use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        
+        // Include file extension in the hash
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            ext.hash(&mut hasher);
+        }
         img.as_bytes().hash(&mut hasher);
         hasher.finish()
     }
@@ -545,7 +698,7 @@ fn find_duplicates(
             // Calculate hash for each image in the group
             for path in group {
                 if let Ok(Some(img)) = load_image(path) {
-                    let hash = hash_image(&img);
+                    let hash = hash_image(&img, path);
                     hash_map.entry(hash).or_default().push(path.clone());
                 }
             }
@@ -611,39 +764,115 @@ fn load_image(path: &Path) -> Result<Option<DynamicImage>, anyhow::Error> {
 
 /// Loads a HEIC/HEIF image and converts it to a DynamicImage
 /// Gets the dimensions of a HEIC/HEIF image without fully decoding it
-fn get_heic_dimensions<P: AsRef<std::path::Path>>(path: P) -> Result<Option<(u32, u32)>, anyhow::Error> {
-    log::debug!("Getting dimensions for HEIC file: {}", path.as_ref().display());
+fn get_heic_dimensions<P: AsRef<Path>>(path: P) -> Result<Option<(u32, u32)>> {
+    let path = path.as_ref();
     
-    let path_str = path.as_ref().to_str().ok_or_else(|| anyhow::anyhow!("Invalid file path"))?;
-    log::trace!("Reading HEIC context from file");
-    let ctx = match HeifContext::read_from_file(path_str) {
-        Ok(ctx) => ctx,
+    // Check if the file exists and is readable first
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
         Err(e) => {
-            log::error!("Failed to read HEIC context: {}", e);
-            return Err(e.into());
+            log::debug!("Could not access HEIC file {}: {}", path.display(), e);
+            return Ok(None);
         }
     };
     
-    log::trace!("Getting primary image handle");
+    if metadata.len() == 0 {
+        log::debug!("HEIC file is empty: {}", path.display());
+        return Ok(None);
+    }
+    
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            log::debug!("Could not read HEIC file {}: {}", path.display(), e);
+            return Ok(None);
+        }
+    };
+
+    // Check file signature ("ftypheic" or "ftypheix" or "ftypmif1" or "ftypmsf1")
+    if bytes.len() < 12 {
+        log::debug!("HEIC file too small: {}", path.display());
+        return Ok(None);
+    }
+    
+    // Check for HEIF/HEIC signature (starts with 'ftyp' and contains 'heic', 'heix', 'mif1', or 'msf1')
+    let is_heif = bytes.len() > 12 && 
+        &bytes[4..8] == b"ftyp" && (
+            &bytes[8..12] == b"heic" ||
+            &bytes[8..12] == b"heix" ||
+            &bytes[8..12] == b"mif1" ||
+            &bytes[8..12] == b"msf1"
+        );
+    
+    if !is_heif {
+        log::debug!("Not a valid HEIC/HEIF file: {}", path.display());
+        return Ok(None);
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, we might have architecture issues with libheif
+        // Try to detect this case and provide a helpful error message
+        if std::mem::size_of::<usize>() != 8 {
+            log::warn!("32-bit Windows is not well supported for HEIC/HEIF files. Please use a 64-bit build for better compatibility.");
+            return Ok(None);
+        }
+    }
+
+    let ctx = match HeifContext::read_from_bytes(&bytes) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            log::debug!("Failed to read HEIC context from {}: {}", path.display(), e);
+            #[cfg(windows)]
+            log::warn!("HEIC processing error on Windows. Make sure you have the required Visual C++ Redistributable installed.");
+            return Ok(None);
+        }
+    };
+
+    // Get the primary image handle
     let handle = match ctx.primary_image_handle() {
         Ok(handle) => handle,
         Err(e) => {
-            log::error!("Failed to get primary image handle: {}", e);
-            return Err(e.into());
+            log::debug!("Failed to get primary image handle from {}: {}", path.display(), e);
+            return Ok(None);
         }
     };
-    
-    let dims = (handle.width() as u32, handle.height() as u32);
-    log::debug!("HEIC dimensions: {}x{}", dims.0, dims.1);
-    Ok(Some(dims))
+
+    let width = handle.width();
+    let height = handle.height();
+
+    if width == 0 || height == 0 {
+        log::debug!("Invalid dimensions in HEIC file {}: {}x{}", path.display(), width, height);
+        return Ok(None);
+    }
+
+    Ok(Some((width, height)))
 }
 
-/// Loads a HEIC/HEIF image efficiently
+/// Loads a HEIC/HEIF image efficiently with better error handling
 fn load_heic<P: AsRef<std::path::Path>>(path: P) -> Result<Option<image::DynamicImage>, anyhow::Error> {
-    log::debug!("Loading HEIC file: {}", path.as_ref().display());
+    let path = path.as_ref();
+    log::debug!("Loading HEIC file: {}", path.display());
+    
+    // Check file size first to avoid reading very large files
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() == 0 {
+        log::debug!("HEIC file is empty: {}", path.display());
+        return Ok(None);
+    }
+    
+    // Check if we're on Windows 32-bit which has known issues
+    #[cfg(windows)]
+    if std::mem::size_of::<usize>() != 8 {
+        log::warn!("HEIC loading on 32-bit Windows is not supported. Please use a 64-bit build.");
+        return Ok(None);
+    }
     
     let libheif = LibHeif::new();
-    let path_str = path.as_ref().to_str().ok_or_else(|| anyhow::anyhow!("Invalid file path"))?;
+    // LibHeif::new() doesn't return a Result, so we don't need to match on it
+    // Any initialization errors will be caught when we try to use it
+    
+    let path_str = path.to_str().ok_or_else(|| anyhow::anyhow!("Invalid file path"))?;
     
     log::trace!("Reading HEIC context");
     let ctx = match HeifContext::read_from_file(path_str) {

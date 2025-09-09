@@ -7,7 +7,8 @@ edition = "2021"
 default = []
 
 [dependencies]
-image = { version = "0.25.2", features = ["jpeg", "png", "gif", "bmp", "tiff"] }
+image = { version = "0.25.2", features = ["jpeg", "gif", "bmp", "tiff"], default-features = false }
+png = "0.17.10"
 walkdir = "2.3.3"
 anyhow = "1.0.97"
 rayon = "1.10.0"

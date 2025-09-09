@@ -67,3 +67,7 @@ OPTIONS:
     -V, --version                  Print version
 ```
 
+
+### Sequential Diagram
+
+![Sequential Diagram](docs/sequence_diagram.png)
