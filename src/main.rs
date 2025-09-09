@@ -6,7 +6,6 @@
 use anyhow::Result;
 use clap::Parser;
 use image::DynamicImage;
-use indicatif::{ProgressBar, ProgressStyle, HumanCount};
 use libheif_rs::{HeifContext, LibHeif, ColorSpace, RgbChroma};
 use rayon::prelude::*;
 use rayon::iter::IntoParallelRefIterator;
@@ -67,7 +66,7 @@ fn main() -> Result<(), anyhow::Error> {
         
         // -----------------------------------------
         // Print results
-        step_4_print_results(all_duplicates, start_time);
+        step_4_print_results(&all_duplicates, start_time);
     }
     
     Ok(())
@@ -170,126 +169,64 @@ fn step_3_process_extensions(
     // Sort extensions by number of files in ascending order
     let mut extensions: Vec<_> = files_by_extension.into_iter().collect();
     extensions.sort_by(|(_, a), (_, b)| a.len().cmp(&b.len()));
-    
-    let pb = ProgressBar::new(total_files as u64);
-    pb.set_style(ProgressStyle::with_template("🔍 {prefix:.bold.dim} {bar:40.cyan/blue} {msg}")
-        .unwrap()
-       
-        .progress_chars("█0123456789-"));
+
     
     // Track progress manually to avoid race conditions
     let mut processed_files = 0;
     
     for (ext, ext_files) in extensions {
-        println!("\n🔍 Processing: .{} - start", ext);
+        println!("");
+        println!("🔍 {} .{}", ext_files.len(), ext);
         
         // Group files by extension and dimensions
-        let dim_groups = group_by_dimensions(&ext_files, &pb);
+        let dim_groups = group_by_dimensions(&ext_files);
         
         // Process each dimension group
         for ((ext, width, height), files) in dim_groups {
-            pb.set_prefix(format!(".{:<6} ({:>7} x {:<7})[{} files]", ext, width, height, files.len()));
-            pb.set_message(format!("{}/{} files - {} duplicates found", 
-                HumanCount(processed_files as u64),
-                HumanCount(total_files as u64),
-                all_duplicates.len()
-            ));
-
+            
             // Step 3: Quick scan with checksum for this dimension group
-            println!("quick_scan");
-            let quick_hashes = quick_scan(&files, width, height, &pb)?;
+            print!("QuickScan {:>6} .{:<6} {:>7} x {:<7} files ",  files.len(), ext, width, height);
+            let quick_hashes = quick_scan(&files, width, height)?;
             
             // Step 4: Find potential duplicates based on quick hashes
-            println!("find_potential_duplicates");
             let potential_duplicates = find_potential_duplicates(quick_hashes);
             
             // Step 5: Deep comparison for potential duplicates in this group
-            println!("find_duplicates");
-            let duplicates = find_duplicates(potential_duplicates, &pb)?;
-            all_duplicates.extend(duplicates);
+            let color = if potential_duplicates.is_empty() { "\x1b[90m" } else { "\x1b[33m" };
+            print!("| {}DeepScan {:>6} files\x1b[0m", color, potential_duplicates.len());
+            
+            let duplicates = find_duplicates(potential_duplicates)?;
+            let num_duplicates = duplicates.len();
+            all_duplicates.extend(duplicates.clone());
             
             // Update progress
             processed_files += files.len();
-            pb.set_position(processed_files as u64);
-            pb.set_message(format!("{}/{} files - {} duplicates found", 
-                HumanCount(processed_files as u64),
-                HumanCount(total_files as u64),
-                all_duplicates.len()
-            ));
+            
+            let color = if num_duplicates == 0 { "\x1b[90m" } else { "" };
+            let dupes_color = if num_duplicates > 0 { "\x1b[31m" } else { "" };
+            println!("| {processed:>7} of {total:<7} {dupes_color}+{dupes}\x1b[0m{color} = {dupes_color}{total_dupes}\x1b[0m duplicates.\x1b[0m",
+                   processed = processed_files,
+                   total = total_files,
+                   dupes = num_duplicates,
+                   total_dupes = all_duplicates.len(),
+                   color = color,
+                   dupes_color = dupes_color);
         }
-        println!("\n🔍 Processing: .{} - end", ext);
     }
     
     Ok(all_duplicates)
 }
 
-/// Groups files by their dimensions and returns groups of potential duplicates
-fn group_by_dimensions(files: &[PathBuf], pb: &ProgressBar) -> Vec<((String, u32, u32), Vec<PathBuf>)> {
-    pb.set_message("Analyzing dimensions...");
-    
-    // Group files by their extension and dimensions
-    let dimension_groups = files
-        .par_iter()
-        .filter_map(|file| {
-            // Get file extension
-            let ext = file.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-                
-            // Get dimensions
-            let dimensions = dimensions::get_dimensions(file);
-            pb.inc(1);
-            
-            // Return (extension, dimensions, file) tuple
-            dimensions.map(|d| ((ext, d.0, d.1), file.clone()))
-        })
-        .fold(
-            || std::collections::HashMap::new(),
-            |mut acc, ((ext, width, height), file)| {
-                acc.entry((ext, width, height))
-                    .or_insert_with(Vec::new)
-                    .push(file);
-                acc
-            },
-        )
-        .reduce(
-            || std::collections::HashMap::new(),
-            |mut a, mut b| {
-                for (k, v) in b.drain() {
-                    a.entry(k).or_default().extend(v);
-                }
-                a
-            },
-        );
-    
-    // Get groups with potential duplicates (2+ files with same dimensions and extension)
-    let (mut dim_groups, _): (Vec<_>, _) = dimension_groups
-        .into_iter()
-        .partition(|(_, files)| files.len() >= 2);
-    
-    // Sort the dimension groups by extension, then width, then height
-    dim_groups.sort_by(|((a_ext, a_w, a_h), _), ((b_ext, b_w, b_h), _)| {
-        // First sort by extension
-        a_ext.cmp(b_ext)
-            // Then by width
-            .then(a_w.cmp(b_w))
-            // Then by height
-            .then(a_h.cmp(b_h))
-    });
-    
-    dim_groups
-}
 
 /// Prints the results of the duplicate search
-fn step_4_print_results(duplicates: Vec<Vec<PathBuf>>, start_time: Instant) {
+fn step_4_print_results(duplicates: &[Vec<PathBuf>], start_time: Instant) {
     if duplicates.is_empty() {
         println!("\n✅ No duplicates found in {:.2?}", start_time.elapsed());
         return;
     }
     
     // Sort groups by size (smallest first)
-    let mut sorted_duplicates = duplicates;
+    let mut sorted_duplicates = duplicates.to_vec();
     sorted_duplicates.sort_by_key(|group| group.len());
     
     println!("\n✨ Found {} groups of duplicates in {:.2?}", 
@@ -322,6 +259,62 @@ fn step_4_print_results(duplicates: Vec<Vec<PathBuf>>, start_time: Instant) {
     println!("\nTotal execution time: {:02}:{:02}:{:02}", hours, minutes, seconds);
 }
 
+/// Groups files by their dimensions and returns groups of potential duplicates
+fn group_by_dimensions(files: &[PathBuf]) -> Vec<((String, u32, u32), Vec<PathBuf>)> {
+    
+    // Group files by their extension and dimensions
+    let dimension_groups = files
+        .par_iter()
+        .filter_map(|file| {
+            // Get file extension
+            let ext = file.extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+                
+            // Get dimensions
+            let dimensions = dimensions::get_dimensions(file);
+            
+            // Return (extension, dimensions, file) tuple
+            dimensions.map(|d| ((ext, d.0, d.1), file.clone()))
+        })
+        .fold(
+            || std::collections::HashMap::new(),
+            |mut acc, ((ext, width, height), file)| {
+                acc.entry((ext, width, height))
+                    .or_insert_with(Vec::new)
+                    .push(file);
+                acc
+            },
+        )
+        .reduce(
+            || std::collections::HashMap::new(),
+            |mut a, mut b| {
+                for (k, v) in b.drain() {
+                    a.entry(k).or_default().extend(v);
+                }
+                a
+            },
+        );
+    
+    // Get groups with potential duplicates (2+ files with same dimensions and extension)
+    let (mut dim_groups, _): (Vec<_>, _) = dimension_groups
+        .into_iter()
+        .partition(|(_, files)| files.len() >= 1);
+    
+    // Sort the dimension groups by extension, then width, then height
+    dim_groups.sort_by(|((a_ext, a_w, a_h), _), ((b_ext, b_w, b_h), _)| {
+        // First sort by extension
+        a_ext.cmp(b_ext)
+            // Then by width
+            .then(a_w.cmp(b_w))
+            // Then by height
+            .then(a_h.cmp(b_h))
+    });
+    
+    dim_groups
+}
+
 /// Performs a quick scan of images to find potential duplicates.
 ///
 /// This function processes images in parallel and computes their perceptual hashes.
@@ -337,11 +330,13 @@ fn step_4_print_results(duplicates: Vec<Vec<PathBuf>>, start_time: Instant) {
 /// # Returns
 /// * `Ok(Vec<(PathBuf, String)>)` - Vector of (file path, hash) tuples
 /// * `Err(anyhow::Error)` - If there was an error processing any of the images
-fn quick_scan(files: &[PathBuf], _width: u32, _height: u32, pb: &ProgressBar) -> Result<Vec<(PathBuf, String)>, anyhow::Error> {
+fn quick_scan(files: &[PathBuf], _width: u32, _height: u32) -> Result<Vec<(PathBuf, String)>, anyhow::Error> {
     use rayon::prelude::*;
     
-    if files.is_empty() {
-        return Ok(Vec::new());
+    match files.len() {
+        0 => return Ok(Vec::new()),
+        1 => return Ok(vec![(files[0].clone(), compute_checksum(&files[0])?)]),
+        _ => {}
     }
     
     // Process files in parallel
@@ -356,8 +351,6 @@ fn quick_scan(files: &[PathBuf], _width: u32, _height: u32, pb: &ProgressBar) ->
                     Err(e)
                 }
             };
-            // Update progress for each file processed
-            pb.inc(1);
             result
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -472,8 +465,7 @@ fn compute_checksum(path: &Path) -> Result<String, anyhow::Error> {
 /// * `Ok(Vec<Vec<PathBuf>>)` - Groups of confirmed duplicate images
 /// * `Err(anyhow::Error)` - If there was an error processing the images
 fn find_duplicates(
-    groups: Vec<Vec<PathBuf>>,
-    pb: &ProgressBar
+    groups: Vec<Vec<PathBuf>>,    
 ) -> Result<Vec<Vec<PathBuf>>, anyhow::Error> {
     use std::collections::HashMap;
     use rayon::prelude::*;
@@ -498,7 +490,6 @@ fn find_duplicates(
         .filter_map(|(_i, group)| {
             if group.len() < 2 {
                 // Update progress for skipped groups
-                pb.inc(1);
                 return None;
             }
 
@@ -521,8 +512,6 @@ fn find_duplicates(
                     group_duplicates.push(files);
                 }
             }
-            
-            pb.inc(1);
             
             if group_duplicates.is_empty() {
                 None

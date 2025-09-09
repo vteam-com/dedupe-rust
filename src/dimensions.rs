@@ -26,6 +26,7 @@ fn get_jpeg_dimensions(path: &Path) -> Option<(u32, u32)> {
         Err(_) => return None,
     };
     
+    // Check for JPEG SOI (Start of Image) marker
     let mut buffer = [0u8; 2];
     if file.read_exact(&mut buffer).is_err() || buffer != [0xFF, 0xD8] {
         return None; // Not a valid JPEG file
@@ -49,12 +50,29 @@ fn get_jpeg_dimensions(path: &Path) -> Option<(u32, u32)> {
         
         // Check for SOF (Start of Frame) marker
         if (0xC0..=0xCF).contains(&buffer[1]) && buffer[1] != 0xC4 && buffer[1] != 0xC8 {
-            if file.read_exact(&mut buffer[..4]).is_err() {
+            // Read the length of the segment
+            if file.read_exact(&mut buffer[..2]).is_err() {
                 return None;
             }
-            let height = u16::from_be_bytes([buffer[0], buffer[1]]) as u32;
-            let width = u16::from_be_bytes([buffer[2], buffer[3]]) as u32;
-            return Some((width, height));
+            let length = u16::from_be_bytes([buffer[0], buffer[1]]) as usize;
+            
+            // Read the precision (1 byte) and image dimensions (4 bytes)
+            let mut segment = vec![0u8; length - 2];
+            if file.read_exact(&mut segment).is_err() {
+                return None;
+            }
+            
+            // The first byte is the precision, then height (2 bytes), then width (2 bytes)
+            if segment.len() >= 5 {  // Need at least 5 bytes (1 precision + 4 for dimensions)
+                let height = u16::from_be_bytes([segment[1], segment[2]]) as u32;
+                let width = u16::from_be_bytes([segment[3], segment[4]]) as u32;
+                
+                // Validate dimensions
+                if width > 0 && height > 0 && width < 30000 && height < 30000 {
+                    return Some((width, height));
+                }
+            }
+            return None;
         } else {
             // Skip this marker section
             if file.read_exact(&mut buffer[..2]).is_err() {
@@ -173,8 +191,6 @@ pub fn get_heic_dimensions<P: AsRef<Path>>(path: P) -> Result<Option<(u32, u32)>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::path::PathBuf;
     
     #[test]
     fn test_get_dimensions() {
