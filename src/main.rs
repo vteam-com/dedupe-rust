@@ -11,9 +11,29 @@ use libheif_rs::{HeifContext, LibHeif, ColorSpace, RgbChroma};
 use rayon::prelude::*;
 use rayon::iter::IntoParallelRefIterator;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use serde::Serialize;
 use thousands::Separable;
+
+/// Formats a duration in a human-readable way
+/// 
+/// # Examples
+/// ```
+/// use std::time::Duration;
+/// let duration = Duration::from_secs(125);
+/// assert_eq!(format_duration(duration), "  2.1m");
+/// ```
+fn format_duration(duration: Duration) -> String {
+    let elapsed_secs = duration.as_secs_f64();
+    if elapsed_secs < 60.0 {
+        format!("{:>5.1}s", elapsed_secs)
+    } else if elapsed_secs < 3600.0 {
+        format!("{:>5.1}m", elapsed_secs / 60.0)
+    } else {
+        format!("{:>5.1}h", elapsed_secs / 3600.0)
+    }
+}
+use indicatif::{ProgressBar, ProgressStyle};
 
 #[derive(Debug, Serialize)]
 struct DuplicateGroup {
@@ -77,7 +97,7 @@ fn main() -> Result<(), anyhow::Error> {
         
         //-----------------------------------------
         // step 3 Process files by extension and find duplicates
-        let all_duplicates = step_3_process_extensions(files_by_extension, image_files.len())?;
+        let all_duplicates = step_3_process_extensions(files_by_extension, image_files.len(), start_time)?;
         
         // -----------------------------------------
         // Print results
@@ -178,6 +198,7 @@ fn step_2_group_files_by_extension(files: &[PathBuf]) -> std::collections::HashM
 fn step_3_process_extensions(
     files_by_extension: std::collections::HashMap<String, Vec<PathBuf>>,
     total_files: usize,
+    start_time: Instant,
 ) -> Result<Vec<Vec<PathBuf>>, anyhow::Error> {
     let mut all_duplicates = Vec::new();
     
@@ -199,17 +220,19 @@ fn step_3_process_extensions(
         // Process each dimension group
         for ((ext, width, height), files) in dim_groups {
             
-            // Step 3: Quick scan with checksum for this dimension group
-            print!("QuickScan {:>6} .{:<6} {:>7} x {:<7} files ",  files.len(), ext, width, height);
+            // Format elapsed time in a human-readable way
+            let elapsed = start_time.elapsed();
+            print!("[{}] \x1b[96m{:>6}\x1b[0m .{:<6} {:>7} x {:<7} ", 
+                format_duration(elapsed), files.len(), ext, width, height);
             let quick_hashes = quick_scan(&files, width, height)?;
             
             // Step 4: Find potential duplicates based on quick hashes
             let potential_duplicates = find_potential_duplicates(quick_hashes);
             
-            // Step 5: Deep comparison for potential duplicates in this group
             let color = if potential_duplicates.is_empty() { "\x1b[90m" } else { "\x1b[33m" };
-            print!("| {}DeepScan {:>6} files\x1b[0m", color, potential_duplicates.len());
+            print!(" >> {}{:>6} \x1b[0m", color, potential_duplicates.len());
             
+            // Step 5: Deep comparison for potential duplicates in this group
             let duplicates = find_duplicates(potential_duplicates)?;
             let num_duplicates = duplicates.len();
             all_duplicates.extend(duplicates.clone());
@@ -219,11 +242,11 @@ fn step_3_process_extensions(
             
             let color = if num_duplicates == 0 { "\x1b[90m" } else { "" };
             let dupes_color = if num_duplicates > 0 { "\x1b[31m" } else { "" };
-            println!("| {processed:>7} of {total:<7} {dupes_color}+{dupes}\x1b[0m{color} = {dupes_color}{total_dupes}\x1b[0m duplicates.\x1b[0m",
-                   processed = processed_files,
-                   total = total_files,
-                   dupes = num_duplicates,
-                   total_dupes = all_duplicates.len(),
+            println!(" >> {processed:>7}/{total:<7} {dupes_color} >> +{dupes}\x1b[0m{color} = {dupes_color}{total_dupes}\x1b[0m duplicates.\x1b[0m",
+                   processed = processed_files.separate_with_commas(),
+                   total = total_files.separate_with_commas(),
+                   dupes = num_duplicates.separate_with_commas(),
+                   total_dupes = all_duplicates.len().separate_with_commas(),
                    color = color,
                    dupes_color = dupes_color);
         }
@@ -310,15 +333,27 @@ fn step_4_print_results(duplicates: &[Vec<PathBuf>], start_time: Instant) {
         duplicates.len().separate_with_commas(), 
         );
 
-    println!("Time to complete: {}", formatted_time);
+    let duration = start_time.elapsed();
+    println!("Time to complete: {}", format_duration(duration));
 }
 
 /// Groups files by their dimensions and returns groups of potential duplicates
 fn group_by_dimensions(files: &[PathBuf]) -> Vec<((String, u32, u32), Vec<PathBuf>)> {
+    println!("🔍 Analyzing image dimensions...");
+    
+    // Create a progress bar
+    let pb = ProgressBar::new(files.len() as u64);
+    pb.set_style(ProgressStyle::with_template(
+        "{elapsed_precise} {bar:40.cyan/blue} {pos}/{len}",
+    ).unwrap()
+    .progress_chars("#>-"));
     
     // Group files by their extension and dimensions
     let dimension_groups: std::collections::HashMap<(String, u32, u32), Vec<PathBuf>> = files
         .par_iter()
+        .inspect(|_| {
+            pb.inc(1);
+        })
         .filter_map(|file| {
             let ext = file.extension()
                 .and_then(|e| e.to_str())
@@ -343,12 +378,17 @@ fn group_by_dimensions(files: &[PathBuf]) -> Vec<((String, u32, u32), Vec<PathBu
         .reduce(
             || std::collections::HashMap::new(),
             |mut a: std::collections::HashMap<_, Vec<_>>, mut b| {
+                // Update progress bar during reduction
+                pb.inc(0); // This just forces a refresh without incrementing
                 for (k, v) in b.drain() {
                     a.entry(k).or_default().extend(v);
                 }
                 a
             },
         );
+    
+    // Finish the progress bar
+    pb.finish_with_message(format!("Analyzed {} files", files.len()));
     
     // Get groups with potential duplicates (2+ files with same dimensions and extension)
     let mut dim_groups: Vec<_> = dimension_groups
@@ -366,6 +406,7 @@ fn group_by_dimensions(files: &[PathBuf]) -> Vec<((String, u32, u32), Vec<PathBu
             .then_with(|| a_h.cmp(&b_h))
     });
     
+    println!("✅ Found {} potential duplicate groups based on dimensions", dim_groups.len());
     dim_groups
 }
 
