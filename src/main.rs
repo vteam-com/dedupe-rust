@@ -14,6 +14,10 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use thousands::Separable;
 
+use libheif_rs::{
+    ColorSpace, HeifContext, RgbChroma, LibHeif
+};
+
 /// Command-line arguments for the duplicate image finder.
 /// 
 /// This struct defines all the command-line arguments that the program accepts,
@@ -31,9 +35,18 @@ struct Args {
 }
 
 fn main() -> Result<(), anyhow::Error> {
-    let start_time = std::time::Instant::now();
+    // Initialize logging
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    
+    // Log the start of the application
+    log::info!("Starting duplicate image finder");
+    
+    // Parse command line arguments
     let args = Args::parse();
-
+    log::debug!("Command line arguments: {:?}", args);
+    
+    let start_time = std::time::Instant::now();
+    
     //-----------------------------------------
     // step 1 find image files
     println!("🔍 Scanning {} for images...", args.directory);
@@ -70,12 +83,13 @@ fn main() -> Result<(), anyhow::Error> {
 /// * `Err(anyhow::Error)` - If there was an error reading the directory
 ///
 /// # Supported Formats
-/// * Processed for duplicates: jpg, jpeg, png, gif
-/// * Listed but not processed: bmp, tiff, tif, webp, heic, heif, raw, cr2, nef, arw, orf, rw2, svg, eps, ai, pdf, ico, dds, psd, xcf, exr, jp2
+/// * Processed for duplicates: jpg, jpeg, png, gif, webp, heic, heif
+/// * Listed but not processed: bmp, tiff, tif, raw, cr2, nef, arw, orf, rw2, svg, eps, ai, pdf, ico, dds, psd, xcf, exr, jp2
 fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
-    // Only include formats we actually support for processing
-    let supported_extensions = ["bmp","jpg", "jpeg", "png", "gif", "webp"];
-    let processed_extensions = supported_extensions;
+    // Define supported image extensions
+    let processed_extensions = ["bmp", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif"];
+    // All supported extensions (including detected but not processed)
+    let supported_extensions = ["bmp", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "tiff", "tif", "raw", "cr2", "nef", "arw", "orf", "rw2", "svg", "eps", "ai", "pdf", "ico", "dds", "psd", "xcf", "exr", "jp2"];
     let mut extension_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut image_files = Vec::new();
     
@@ -100,7 +114,7 @@ fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Erro
         println!("Found {} files found, ", total_count.separate_with_commas());
         
         let supported_count = image_files.len();
-        println!("{} [X] Marked extensions will be checked for duplicates.", supported_count.separate_with_commas());
+        println!("{} type of files found.", supported_count.separate_with_commas());
         
         let mut extensions: Vec<_> = extension_counts.iter().collect();
         // Sort by count in descending order, then by extension name
@@ -108,9 +122,14 @@ fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Erro
             a_count.cmp(b_count).then_with(|| b_ext.cmp(a_ext))
         );
         
+        use colored::*;
         for (ext, &count) in extensions {
-            let marker = if processed_extensions.contains(&ext.as_str()) { "[X]" } else { "[ ]" };
-            println!("{} {:<6}: {}", marker, format!(".{}", ext), count.separate_with_commas());
+            let (marker, ext_display) = if processed_extensions.contains(&ext.as_str()) {
+                ("[SUPPORTED]".green().bold(), format!(".{}", ext).green())
+            } else {
+                ("[skipping ]".yellow(), format!(".{}", ext).yellow())
+            };
+            println!("{} {:<6}: {}", marker, ext_display, count.separate_with_commas());
         }
         println!(); // Add an extra newline for better readability
     }
@@ -345,7 +364,22 @@ fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
         .and_then(|e| e.to_str())
         .map(|s| s.to_lowercase());
     
-    // Only try to get dimensions for supported image formats
+    // Check if the file is a HEIC/HEIF image
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if ext.eq_ignore_ascii_case("heic") || ext.eq_ignore_ascii_case("heif") {
+            match get_heic_dimensions(path) {
+                Ok(Some(dims)) => return Some(dims),
+                Ok(None) => return None,
+                Err(e) => {
+                    eprintln!("⚠️  Warning: Could not read HEIC dimensions from {}: {}", path.display(), e);
+                    return None;
+                }
+            }
+        }
+    }
+
+    
+    // Handle other image formats
     match ext.as_deref() {
         Some("jpg") | Some("jpeg") | Some("png") | Some("gif") | Some("webp") => {
             // These are the formats we know how to handle
@@ -359,7 +393,7 @@ fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
             
             if let Ok(file) = File::open(path) {
                 let reader = BufReader::new(file);
-                if let Ok(dimensions) = image::io::Reader::with_format(reader, format)
+                if let Ok(dimensions) = image::ImageReader::with_format(reader, format)
                     .with_guessed_format()
                     .map_err(|_| ())
                     .and_then(|r| Ok(r.into_dimensions().map_err(|_| ())?))
@@ -552,6 +586,20 @@ fn find_duplicates(
 /// * `Ok(None)` - If the image could not be loaded (with error message printed to stderr)
 /// * `Err(anyhow::Error)` - If there was an unexpected error
 fn load_image(path: &Path) -> Result<Option<DynamicImage>, anyhow::Error> {
+    // Check if the file is a HEIC/HEIF image
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if ext.eq_ignore_ascii_case("heic") || ext.eq_ignore_ascii_case("heif") {
+            match load_heic(path) {
+                Ok(img) => return Ok(img),
+                Err(e) => {
+                    eprintln!("⚠️  Warning: Could not load HEIC image {}: {}", path.display(), e);
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    
+    // Handle other image formats
     match image::open(path) {
         Ok(img) => Ok(Some(img)),
         Err(e) => {
@@ -559,4 +607,126 @@ fn load_image(path: &Path) -> Result<Option<DynamicImage>, anyhow::Error> {
             Ok(None)
         }
     }
+}
+
+/// Loads a HEIC/HEIF image and converts it to a DynamicImage
+/// Gets the dimensions of a HEIC/HEIF image without fully decoding it
+fn get_heic_dimensions<P: AsRef<std::path::Path>>(path: P) -> Result<Option<(u32, u32)>, anyhow::Error> {
+    log::debug!("Getting dimensions for HEIC file: {}", path.as_ref().display());
+    
+    let path_str = path.as_ref().to_str().ok_or_else(|| anyhow::anyhow!("Invalid file path"))?;
+    log::trace!("Reading HEIC context from file");
+    let ctx = match HeifContext::read_from_file(path_str) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            log::error!("Failed to read HEIC context: {}", e);
+            return Err(e.into());
+        }
+    };
+    
+    log::trace!("Getting primary image handle");
+    let handle = match ctx.primary_image_handle() {
+        Ok(handle) => handle,
+        Err(e) => {
+            log::error!("Failed to get primary image handle: {}", e);
+            return Err(e.into());
+        }
+    };
+    
+    let dims = (handle.width() as u32, handle.height() as u32);
+    log::debug!("HEIC dimensions: {}x{}", dims.0, dims.1);
+    Ok(Some(dims))
+}
+
+/// Loads a HEIC/HEIF image efficiently
+fn load_heic<P: AsRef<std::path::Path>>(path: P) -> Result<Option<image::DynamicImage>, anyhow::Error> {
+    log::debug!("Loading HEIC file: {}", path.as_ref().display());
+    
+    let libheif = LibHeif::new();
+    let path_str = path.as_ref().to_str().ok_or_else(|| anyhow::anyhow!("Invalid file path"))?;
+    
+    log::trace!("Reading HEIC context");
+    let ctx = match HeifContext::read_from_file(path_str) {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            log::error!("Failed to read HEIC context: {}", e);
+            return Err(e.into());
+        }
+    };
+    
+    log::trace!("Getting primary image handle");
+    let handle = match ctx.primary_image_handle() {
+        Ok(handle) => handle,
+        Err(e) => {
+            log::error!("Failed to get primary image handle: {}", e);
+            return Err(e.into());
+        }
+    };
+    
+    // Get dimensions from metadata
+    let width = handle.width() as u32;
+    let height = handle.height() as u32;
+    
+    // Decode directly to RGB with minimum quality loss
+    let image = libheif.decode(&handle, ColorSpace::Rgb(RgbChroma::Rgb), None)?;
+    let planes = image.planes();
+    
+    // Try to get interleaved RGB data first (most efficient)
+    if let Some(interleaved) = planes.interleaved {
+        let data = interleaved.data;
+        if data.len() >= (width * height * 3) as usize {
+            // Convert RGB to RGBA by adding alpha channel
+            let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
+            for chunk in data.chunks(3) {
+                rgba_data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+            }
+            
+            if let Some(img) = image::RgbaImage::from_raw(width, height, rgba_data) {
+                return Ok(Some(image::DynamicImage::ImageRgba8(img)));
+            }
+        }
+    }
+    
+    // Fallback to separate planes if interleaved not available
+    if let (Some(y_plane), Some(cb_plane), Some(cr_plane)) = (&planes.y, &planes.cb, &planes.cr) {
+        // Convert YCbCr to RGB
+        let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
+        
+        for i in 0..(width * height) as usize {
+            let y = y_plane.data[i] as f32;
+            let cb = cb_plane.data[i] as f32 - 128.0;
+            let cr = cr_plane.data[i] as f32 - 128.0;
+            
+            // YCbCr to RGB conversion
+            let r = (y + 1.402 * cr).max(0.0).min(255.0) as u8;
+            let g = (y - 0.344136 * cb - 0.714136 * cr).max(0.0).min(255.0) as u8;
+            let b = (y + 1.772 * cb).max(0.0).min(255.0) as u8;
+            
+            rgb_data.extend_from_slice(&[r, g, b]);
+        }
+        
+        // Convert RGB to RGBA
+        let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
+        for chunk in rgb_data.chunks(3) {
+            rgba_data.extend_from_slice(&[chunk[0], chunk[1], chunk[2], 255]);
+        }
+        
+        if let Some(img) = image::RgbaImage::from_raw(width, height, rgba_data) {
+            return Ok(Some(image::DynamicImage::ImageRgba8(img)));
+        }
+    }
+    
+    // Last resort: Use Y plane as grayscale if color conversion fails
+    if let Some(y_plane) = &planes.y {
+        let mut rgba_data = Vec::with_capacity((width * height * 4) as usize);
+        for &y in y_plane.data.iter() {
+            rgba_data.extend_from_slice(&[y, y, y, 255]);
+        }
+        
+        if let Some(img) = image::RgbaImage::from_raw(width, height, rgba_data) {
+            return Ok(Some(image::DynamicImage::ImageRgba8(img)));
+        }
+    }
+    
+    Ok(None)
 }

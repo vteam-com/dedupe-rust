@@ -7,7 +7,7 @@ A high-performance command-line tool to find and manage duplicate images in your
 - 🚀 Blazing fast scanning using multi-threading with Rayon
 - 🔍 Two-phase detection (quick hash + deep comparison)
 - 📊 Detailed file statistics including extension-based grouping
-- 🖼️ Supports multiple image formats (JPEG, PNG, GIF, BMP, TIFF)
+- 🖼️ Supports multiple image formats (JPEG, PNG, GIF, BMP, TIFF, HEIC, HEIF)
 - 📈 Progress tracking with `indicatif`
 - ⚙️ Configurable similarity threshold (0.0-1.0)
 - 🛠️ Early termination for faster processing
@@ -17,6 +17,12 @@ A high-performance command-line tool to find and manage duplicate images in your
 
 ### Prerequisites
 - Rust and Cargo (Rust's package manager) installed
+- System dependencies for HEIC/HEIF support:
+  - Windows: [vcpkg](https://vcpkg.io/) with `libheif`
+  - macOS: `brew install libheif`
+  - Linux (Debian/Ubuntu): `sudo apt-get install libheif-dev`
+
+  For detailed instructions, see [HEIC_HEIF_TESTING.md](HEIC_HEIF_TESTING.md).
 
 ### Building from Source
 
@@ -33,7 +39,10 @@ cargo build --release
 
 ## Usage
 
-```bash
+```text
+
+cargo run --bin duplicate_image_finder --release --d c:\MyFolder\To\Scan
+
 # Basic usage (scans current directory)
 ./duplicate_image_finder
 
