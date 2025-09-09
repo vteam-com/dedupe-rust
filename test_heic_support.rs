@@ -61,7 +61,7 @@ fn load_heic<P: AsRef<std::path::Path>>(path: P) -> Result<Option<image::Dynamic
         let data = interleaved.data;
         
         // Calculate bytes per pixel based on bits per pixel
-        let bytes_per_pixel = (interleaved.bits_per_pixel + 7) / 8;
+        let bytes_per_pixel = interleaved.bits_per_pixel.div_ceil(8);
         
         // We expect 3 (RGB) or 4 (RGBA) bytes per pixel
         if bytes_per_pixel >= 3 {

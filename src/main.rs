@@ -175,7 +175,7 @@ fn step_3_process_extensions(
     let mut processed_files = 0;
     
     for (ext, ext_files) in extensions {
-        println!("");
+        println!();
         println!("🔍 {} .{}", ext_files.len(), ext);
         
         // Group files by extension and dimensions
@@ -263,10 +263,9 @@ fn step_4_print_results(duplicates: &[Vec<PathBuf>], start_time: Instant) {
 fn group_by_dimensions(files: &[PathBuf]) -> Vec<((String, u32, u32), Vec<PathBuf>)> {
     
     // Group files by their extension and dimensions
-    let dimension_groups = files
+    let dimension_groups: std::collections::HashMap<(String, u32, u32), Vec<PathBuf>> = files
         .par_iter()
         .filter_map(|file| {
-            // Get file extension
             let ext = file.extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
@@ -280,16 +279,16 @@ fn group_by_dimensions(files: &[PathBuf]) -> Vec<((String, u32, u32), Vec<PathBu
         })
         .fold(
             || std::collections::HashMap::new(),
-            |mut acc, ((ext, width, height), file)| {
+            |mut acc: std::collections::HashMap<_, Vec<_>>, ((ext, width, height), file)| {
                 acc.entry((ext, width, height))
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(file);
                 acc
             },
         )
         .reduce(
             || std::collections::HashMap::new(),
-            |mut a, mut b| {
+            |mut a: std::collections::HashMap<_, Vec<_>>, mut b| {
                 for (k, v) in b.drain() {
                     a.entry(k).or_default().extend(v);
                 }
@@ -298,18 +297,19 @@ fn group_by_dimensions(files: &[PathBuf]) -> Vec<((String, u32, u32), Vec<PathBu
         );
     
     // Get groups with potential duplicates (2+ files with same dimensions and extension)
-    let (mut dim_groups, _): (Vec<_>, _) = dimension_groups
+    let mut dim_groups: Vec<_> = dimension_groups
         .into_iter()
-        .partition(|(_, files)| files.len() >= 1);
+        .filter(|(_, files)| files.len() > 1)
+        .collect();
     
     // Sort the dimension groups by extension, then width, then height
-    dim_groups.sort_by(|((a_ext, a_w, a_h), _), ((b_ext, b_w, b_h), _)| {
+    dim_groups.sort_by(|&((ref a_ext, a_w, a_h), _), &((ref b_ext, b_w, b_h), _)| {
         // First sort by extension
         a_ext.cmp(b_ext)
             // Then by width
-            .then(a_w.cmp(b_w))
+            .then_with(|| a_w.cmp(&b_w))
             // Then by height
-            .then(a_h.cmp(b_h))
+            .then_with(|| a_h.cmp(&b_h))
     });
     
     dim_groups
@@ -639,9 +639,9 @@ fn load_heic<P: AsRef<std::path::Path>>(path: P) -> Result<Option<image::Dynamic
             let cr = cr_plane.data[i] as f32 - 128.0;
             
             // YCbCr to RGB conversion
-            let r = (y + 1.402 * cr).max(0.0).min(255.0) as u8;
-            let g = (y - 0.344136 * cb - 0.714136 * cr).max(0.0).min(255.0) as u8;
-            let b = (y + 1.772 * cb).max(0.0).min(255.0) as u8;
+            let r = (y + 1.402 * cr).clamp(0.0, 255.0) as u8;
+            let g = (y - 0.344136 * cb - 0.714136 * cr).clamp(0.0, 255.0) as u8;
+            let b = (y + 1.772 * cb).clamp(0.0, 255.0) as u8;
             
             rgb_data.extend_from_slice(&[r, g, b]);
         }

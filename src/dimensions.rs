@@ -6,6 +6,7 @@ use libheif_rs::{LibHeif, HeifContext};
 use png;
 
 /// Gets the dimensions of an image file by delegating to format-specific functions.
+#[allow(dead_code)]
 pub fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
     let ext = path.extension()?.to_str()?.to_lowercase();
     // Handle formats with optimized dimension detection first
@@ -20,7 +21,7 @@ pub fn get_dimensions(path: &Path) -> Option<(u32, u32)> {
 }
 
 /// Gets the dimensions of a JPEG file by reading minimal header data.
-fn get_jpeg_dimensions(path: &Path) -> Option<(u32, u32)> {
+pub fn get_jpeg_dimensions(path: &Path) -> Option<(u32, u32)> {
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(_) => return None,
@@ -87,7 +88,8 @@ fn get_jpeg_dimensions(path: &Path) -> Option<(u32, u32)> {
 }
 
 /// Gets the dimensions of a PNG file by reading just the header.
-fn get_png_dimensions(path: &Path) -> Option<(u32, u32)> {
+#[allow(dead_code)]
+pub(crate) fn get_png_dimensions(path: &Path) -> Option<(u32, u32)> {
     use std::io::BufReader;
     
     let file = match File::open(path) {
@@ -105,7 +107,8 @@ fn get_png_dimensions(path: &Path) -> Option<(u32, u32)> {
 }
 
 /// Gets the dimensions of a GIF file by reading just the header.
-fn get_gif_dimensions(path: &Path) -> Option<(u32, u32)> {
+#[allow(dead_code)]
+pub(crate) fn get_gif_dimensions(path: &Path) -> Option<(u32, u32)> {
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(_) => return None,
@@ -128,7 +131,8 @@ fn get_gif_dimensions(path: &Path) -> Option<(u32, u32)> {
 }
 
 /// Gets the dimensions of a WebP file by reading the header.
-fn get_webp_dimensions(path: &Path) -> Option<(u32, u32)> {
+#[allow(dead_code)]
+pub(crate) fn get_webp_dimensions(path: &Path) -> Option<(u32, u32)> {
     let mut file = match File::open(path) {
         Ok(f) => f,
         Err(_) => return None,
@@ -174,6 +178,7 @@ fn get_webp_dimensions(path: &Path) -> Option<(u32, u32)> {
 }
 
 /// Gets the dimensions of a HEIC/HEIF image without fully decoding it
+#[allow(dead_code)]
 pub fn get_heic_dimensions<P: AsRef<Path>>(path: P) -> Result<Option<(u32, u32)>> {
     let _lib = LibHeif::new();
     let ctx = match HeifContext::read_from_file(path.as_ref().to_str().unwrap()) {
@@ -186,7 +191,7 @@ pub fn get_heic_dimensions<P: AsRef<Path>>(path: P) -> Result<Option<(u32, u32)>
         Err(_) => return Ok(None),
     };
     
-    Ok(Some((handle.width() as u32, handle.height() as u32)))
+    Ok(Some((handle.width(), handle.height())))
 }
 
 #[cfg(test)]

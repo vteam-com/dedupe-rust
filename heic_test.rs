@@ -55,8 +55,8 @@ fn load_heic<P: AsRef<Path>>(path: P) -> Result<Option<DynamicImage>> {
     
     // Try to handle YCbCr format
     if let (Some(y_plane), Some(cb_plane), Some(cr_plane)) = (&planes.y, &planes.cb, &planes.cr) {
-        let width = y_plane.width as u32;
-        let height = y_plane.height as u32;
+        let width = y_plane.width;
+        let height = y_plane.height;
         
         // Convert YCbCr to RGB (simplified)
         let mut rgb_data = Vec::with_capacity((width * height * 3) as usize);
@@ -66,10 +66,10 @@ fn load_heic<P: AsRef<Path>>(path: P) -> Result<Option<DynamicImage>> {
             let cb = cb_plane.data[i] as f32 - 128.0;
             let cr = cr_plane.data[i] as f32 - 128.0;
             
-            // YCbCr to RGB conversion
-            let r = (y + 1.402 * cr).max(0.0).min(255.0) as u8;
-            let g = (y - 0.344136 * cb - 0.714136 * cr).max(0.0).min(255.0) as u8;
-            let b = (y + 1.772 * cb).max(0.0).min(255.0) as u8;
+            // YCbCr to RGB conversion using clamp for better readability
+            let r = (y + 1.402 * cr).clamp(0.0, 255.0) as u8;
+            let g = (y - 0.344136 * cb - 0.714136 * cr).clamp(0.0, 255.0) as u8;
+            let b = (y + 1.772 * cb).clamp(0.0, 255.0) as u8;
             
             rgb_data.extend_from_slice(&[r, g, b]);
         }
@@ -83,8 +83,8 @@ fn load_heic<P: AsRef<Path>>(path: P) -> Result<Option<DynamicImage>> {
     
     // Fallback to just using Y plane as grayscale
     if let Some(y_plane) = &planes.y {
-        let width = y_plane.width as u32;
-        let height = y_plane.height as u32;
+        let width = y_plane.width;
+        let height = y_plane.height;
         let img = image::GrayImage::from_raw(width, height, y_plane.data.to_vec())
             .map(DynamicImage::ImageLuma8);
         
