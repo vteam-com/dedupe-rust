@@ -89,7 +89,7 @@ fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Erro
     // Define supported image extensions
     let processed_extensions = ["bmp", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif"];
     // All supported extensions (including detected but not processed)
-    let supported_extensions = ["bmp", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "tiff", "tif", "raw", "cr2", "nef", "arw", "orf", "rw2", "svg", "eps", "ai", "pdf", "ico", "dds", "psd", "xcf", "exr", "jp2"];
+    let known_image_extensions = ["bmp", "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "tiff", "tif", "raw", "cr2", "nef", "arw", "orf", "rw2", "svg", "eps", "ai", "pdf", "ico", "dds", "psd", "xcf", "exr", "jp2"];
     let mut extension_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut image_files = Vec::new();
     
@@ -102,7 +102,7 @@ fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Erro
             let ext_lower = ext.to_lowercase();
             *extension_counts.entry(ext_lower.clone()).or_default() += 1;
             
-            if supported_extensions.contains(&ext_lower.as_str()) {
+            if known_image_extensions.contains(&ext_lower.as_str()) {
                 image_files.push(entry.path().to_path_buf());
             }
         }
@@ -165,7 +165,7 @@ fn step_3_process_extensions(
     pb.set_style(ProgressStyle::with_template("🔍 {prefix:.bold.dim} {bar:40.cyan/blue} {msg}")
         .unwrap()
        
-        .progress_chars("█░0123456789X=-·"));
+        .progress_chars("█0123456789-"));
     
     // Track progress manually to avoid race conditions
     let mut processed_files = 0;
