@@ -11,6 +11,8 @@ use rayon::prelude::*;
 use rayon::iter::IntoParallelRefIterator;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use std::io::{self, Write};
+use serde::Serialize;
 use thousands::Separable;
 
 mod dimensions;
@@ -218,10 +220,67 @@ fn step_3_process_extensions(
 }
 
 
-/// Prints the results of the duplicate search
+/// Prompts the user to select an output format
+fn prompt_output_format() -> io::Result<String> {
+    println!("Select output format:");
+    println!("1) Plain text");
+    println!("2) JSON");
+    print!("Enter your choice (1-2): ");
+    io::stdout().flush()?;
+    
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    
+    match input.trim() {
+        "1" => Ok("plain".to_string()),
+        "2" => Ok("json".to_string()),
+        _ => {
+            println!("Invalid choice. Defaulting to plain text.");
+            Ok("plain".to_string())
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DuplicateGroup {
+    files: Vec<String>,
+    dimensions: String,
+}
+
+#[derive(Serialize)]
+struct Results {
+    groups: Vec<DuplicateGroup>,
+    total_groups: usize,
+    execution_time: String,
+}
+
+/// Prints the results of the duplicate search in the specified format
 fn step_4_print_results(duplicates: &[Vec<PathBuf>], start_time: Instant) {
+    // Prompt for output format
+    let format = match prompt_output_format() {
+        Ok(fmt) => fmt,
+        Err(e) => {
+            eprintln!("Error getting output format: {}. Using plain text.", e);
+            "plain".to_string()
+        }
+    };
+    
     if duplicates.is_empty() {
-        println!("\n✅ No duplicates found in {:.2?}", start_time.elapsed());
+        let message = format!("\n✅ No duplicates found in {:.2?}", start_time.elapsed());
+        if format == "json" {
+            let results = Results {
+                groups: Vec::new(),
+                total_groups: 0,
+                execution_time: format!("{:.2?}", start_time.elapsed()),
+            };
+            if let Ok(json) = serde_json::to_string_pretty(&results) {
+                println!("{}", json);
+            } else {
+                println!("{}", message);
+            }
+        } else {
+            println!("{}", message);
+        }
         return;
     }
     
@@ -229,11 +288,56 @@ fn step_4_print_results(duplicates: &[Vec<PathBuf>], start_time: Instant) {
     let mut sorted_duplicates = duplicates.to_vec();
     sorted_duplicates.sort_by_key(|group| group.len());
     
+    let elapsed = start_time.elapsed();
+    let total_seconds = elapsed.as_secs();
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    let formatted_time = format!("{:02}:{:02}:{:02}", hours, minutes, seconds);
+    
+    if format == "json" {
+        let mut groups = Vec::new();
+        
+        for group in &sorted_duplicates {
+            let dimensions = group.first()
+                .and_then(|p| dimensions::get_dimensions(p))
+                .map(|(w, h)| format!("{}x{}", w, h))
+                .unwrap_or_else(|| "unknown".to_string());
+                
+            let files: Vec<String> = group.iter()
+                .map(|p| p.display().to_string())
+                .collect();
+                
+            groups.push(DuplicateGroup {
+                files,
+                dimensions,
+            });
+        }
+        
+        let results = Results {
+            groups,
+            total_groups: sorted_duplicates.len(),
+            execution_time: formatted_time,
+        };
+        
+        if let Ok(json) = serde_json::to_string_pretty(&results) {
+            println!("{}", json);
+        } else {
+            println!("Error formatting results as JSON");
+            print_results_plain(&sorted_duplicates, start_time);
+        }
+    } else {
+        print_results_plain(&sorted_duplicates, start_time);
+    }
+}
+
+/// Prints results in plain text format
+fn print_results_plain(duplicates: &[Vec<PathBuf>], start_time: Instant) {
     println!("\n✨ Found {} groups of duplicates in {:.2?}", 
-        sorted_duplicates.len().separate_with_commas(), 
+        duplicates.len().separate_with_commas(), 
         start_time.elapsed());
     
-    for (i, group) in sorted_duplicates.iter().enumerate() {
+    for (i, group) in duplicates.iter().enumerate() {
         // Get dimensions of the first image in the group
         let dimensions = group.first()
             .and_then(|p| dimensions::get_dimensions(p))
