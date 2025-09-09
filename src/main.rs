@@ -66,7 +66,11 @@ struct Args {
         
     /// Number of images to process in each batch (default: 1000)
     #[arg(short, long, default_value_t = 1000)]
-    batch_size: usize,    
+    batch_size: usize,
+    
+    /// Folders to exclude from scanning (can be specified multiple times)
+    #[arg(long, value_name = "FOLDER")]
+    exclude: Vec<String>,
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -85,7 +89,7 @@ fn main() -> Result<(), anyhow::Error> {
     //-----------------------------------------
     // step 1 find image files
     println!("🔍 Scanning {} for images...", args.directory);
-    let image_files = step_1_find_image_files(&args.directory)?;
+    let image_files = step_1_find_image_files(&args.directory, &args.exclude)?;
     
     if image_files.is_empty() {
         println!("❌ No image files found in the specified directory.");
@@ -101,7 +105,7 @@ fn main() -> Result<(), anyhow::Error> {
         
         // -----------------------------------------
         // Print results
-        step_4_print_results(&all_duplicates, start_time);
+        step_4_print_results(&all_duplicates, start_time, image_files.len());
     }
     
     Ok(())
@@ -120,7 +124,7 @@ fn main() -> Result<(), anyhow::Error> {
 /// # Supported Formats
 /// * Processed for duplicates: jpg, jpeg, png, gif, webp, heic, heif
 /// * Listed but not processed: bmp, tiff, tif, raw, cr2, nef, arw, orf, rw2, svg, eps, ai, pdf, ico, dds, psd, xcf, exr, jp2
-fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Error> {
+fn step_1_find_image_files(directory: &str, exclude_folders: &[String]) -> Result<Vec<PathBuf>, anyhow::Error> {
     // Define supported image extensions
     let processed_extensions = ["bmp", "jpg", "jpeg", "png", "gif", "webp"]; //, "heic", "heif"];
     // All supported extensions (including detected but not processed)
@@ -130,6 +134,25 @@ fn step_1_find_image_files(directory: &str) -> Result<Vec<PathBuf>, anyhow::Erro
     
     for entry in walkdir::WalkDir::new(directory)
         .into_iter()
+        .filter_entry(move |e| {
+            // Skip hidden directories and files
+            let is_hidden = e.file_name()
+                .to_str()
+                .map(|s| s.starts_with('.'))
+                .unwrap_or(false);
+                
+            // Skip excluded folders
+            let is_excluded = e.path()
+                .components()
+                .any(|c| {
+                    c.as_os_str()
+                        .to_str()
+                        .map(|s| exclude_folders.iter().any(|x| x == s))
+                        .unwrap_or(false)
+                });
+                
+            !is_hidden && !is_excluded
+        })
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {
@@ -256,7 +279,7 @@ fn step_3_process_extensions(
 }
 
 /// Prints the results of the duplicate search and saves to a JSON file
-fn step_4_print_results(duplicates: &[Vec<PathBuf>], start_time: Instant) {
+fn step_4_print_results(duplicates: &[Vec<PathBuf>], start_time: Instant, total_files_found: usize) {
     let formatted_time = format!("{:.2?}", start_time.elapsed());
     
     if duplicates.is_empty() {
@@ -326,15 +349,16 @@ fn step_4_print_results(duplicates: &[Vec<PathBuf>], start_time: Instant) {
         eprintln!("Error serializing results to JSON");
     }
     
+    // Calculate duplicate statistics
+    let total_files_in_duplicate_groups = duplicates.iter().map(|group| group.len()).sum::<usize>();
+    let total_unique_files = total_files_found - (total_files_in_duplicate_groups - duplicates.len());
+    
     // Print summary to console
-    println!("\n✨ Found {} images in {} groups of duplicates.", 
-        // total files in all groups
-        duplicates.iter().map(|group| group.len()).sum::<usize>().separate_with_commas(), 
-        duplicates.len().separate_with_commas(), 
-        );
-
-    let duration = start_time.elapsed();
-    println!("Time to complete: {}", format_duration(duration));
+    println!("\n📊 Summary:");
+    println!("  • {} files scanned", total_files_found.separate_with_commas());
+    println!("  • {} unique files", total_unique_files.separate_with_commas());
+    println!("  • {} duplicate files in {} groups",  duplicates.iter().map(|group| group.len()).sum::<usize>().separate_with_commas(),duplicates.len().separate_with_commas());
+    println!("  • Complete in {}", format_duration(start_time.elapsed()).trim());
 }
 
 /// Groups files by their dimensions and returns groups of potential duplicates
